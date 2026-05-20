@@ -525,7 +525,7 @@
       }
     }
 
-    // ===== OCR Worker =====
+    // ===== OCR Worker 初始化（使用更优的 PSM 模式）=====
     async function initOCRWorker() {
       if (worker) return;
       setStatus('正在加载 OCR 模型（首次约需30秒）...', 'loading');
@@ -537,13 +537,19 @@
             }
           }
         });
+        await worker.setParameters({
+          // PSM 6: Assume a uniform block of text. 最适合表格类布局
+          tessedit_pageseg_mode: '6',
+          // 提高中文识别精度
+          preserve_interword_spaces: '1',
+        });
         setStatus('OCR 就绪，请拍照识别', 'ok');
       } catch (e) {
         setStatus('OCR 加载失败：' + e.message, 'err');
       }
     }
 
-    // ===== 拍照并识别 =====
+    // ===== 拍照并识别（标签定位法）=====
     async function captureAndRecognize() {
       if (!worker) { setStatus('OCR 正在初始化，请稍候', 'loading'); return; }
       if (!cameraOn) { setStatus('请先打开摄像头', 'err'); return; }
@@ -558,50 +564,17 @@
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
 
-        // 高分辨率截取整张图
-        const fullW = canvas.width;
-        const fullH = canvas.height;
+        // 对整张图做一次 OCR，获取每个词的位置
+        const fullDataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        setStatus('正在识别文字位置...', 'loading');
+        const result = await worker.recognize(fullDataUrl);
 
-        // 姓名区域: 左侧 15%~60% 宽度，20%~75% 高度（学生信息表通常在这个范围）
-        const nameLeft   = Math.floor(fullW * 0.15);
-        const nameTop    = Math.floor(fullH * 0.20);
-        const nameWidth  = Math.floor(fullW * 0.45);
-        const nameHeight = Math.floor(fullH * 0.55);
+        const words = result.data.words || [];
+        setStatus('正在定位姓名和成绩...', 'loading');
 
-        // 成绩区域: 右侧 45%~85% 宽度，20%~75% 高度
-        const scoreLeft   = Math.floor(fullW * 0.45);
-        const scoreTop    = Math.floor(fullH * 0.20);
-        const scoreWidth  = Math.floor(fullW * 0.40);
-        const scoreHeight = Math.floor(fullH * 0.55);
+        const { name, score, rawNameText, rawScoreText } = locateByLabels(words, result.data.text);
 
-        // 截取姓名区域（放大2倍以提高OCR精度）
-        const nameCanvas = document.createElement('canvas');
-        nameCanvas.width  = nameWidth  * 2;
-        nameCanvas.height = nameHeight * 2;
-        const nameCtx = nameCanvas.getContext('2d');
-        nameCtx.drawImage(canvas, nameLeft, nameTop, nameWidth, nameHeight, 0, 0, nameCanvas.width, nameCanvas.height);
-        const nameDataUrl = nameCanvas.toDataURL('image/jpeg', 0.95);
-
-        // 截取成绩区域（放大2倍）
-        const scoreCanvas = document.createElement('canvas');
-        scoreCanvas.width  = scoreWidth  * 2;
-        scoreCanvas.height = scoreHeight * 2;
-        const scoreCtx = scoreCanvas.getContext('2d');
-        scoreCtx.drawImage(canvas, scoreLeft, scoreTop, scoreWidth, scoreHeight, 0, 0, scoreCanvas.width, scoreCanvas.height);
-        const scoreDataUrl = scoreCanvas.toDataURL('image/jpeg', 0.95);
-
-        lastCapture = nameDataUrl;
-
-        setStatus('正在识别姓名区域...', 'loading');
-        const nameResult = await worker.recognize(nameDataUrl);
-        const nameText = nameResult.data.text;
-
-        setStatus('正在识别成绩区域...', 'loading');
-        const scoreResult = await worker.recognize(scoreDataUrl);
-        const scoreText = scoreResult.data.text;
-
-        setStatus('识别完成，正在分析...', 'loading');
-        displayResult(nameText, scoreText, nameResult.data, scoreResult.data);
+        displayResult(name, score, rawNameText, rawScoreText);
 
       } catch (e) {
         setStatus('识别失败：' + e.message, 'err');
@@ -609,6 +582,195 @@
         btn.disabled = false;
         btn.classList.remove('loading');
       }
+    }
+
+    // ===== 标签定位法：找"姓名"和"成绩"标签附近的值 =====
+    function locateByLabels(words, fullText) {
+      // 找"姓名"标签的词
+      const nameLabel = words.find(w =>
+        w.text === '姓名' ||
+        w.text === '姓名：' || w.text === '姓名:' ||
+        w.text === '姓名 ' || w.text === '姓名:' ||
+        w.text === '学生姓名' ||
+        (w.text.includes('姓名') && w.text.length <= 4)
+      );
+
+      // 找"成绩"标签的词
+      const scoreLabel = words.find(w =>
+        w.text === '成绩' ||
+        w.text === '成绩：' || w.text === '成绩:' ||
+        w.text === '成绩 ' || w.text === '成绩:' ||
+        w.text === '得分' ||
+        (w.text.includes('成绩') && w.text.length <= 4)
+      );
+
+      let rawNameText = '';
+      let rawScoreText = '';
+
+      // ===== 定位姓名值 =====
+      let detectedName = null;
+      if (nameLabel) {
+        // 在姓名标签右侧、同一行（y坐标接近）找最大汉字词
+        const labelTop = nameLabel.baseline.y1 - nameLabel.bbox.y1; // 估算字符高度
+        const rowTolerance = labelTop * 1.5;
+
+        // 找右侧同行的汉字词
+        const candidates = words.filter(w => {
+          if (!w.text) return false;
+          const isChinese = /[\u4e00-\u9fff]/.test(w.text);
+          if (!isChinese) return false;
+          if (w.text === '姓名' || w.text === '姓名:' || w.text === '姓名：') return false;
+          // y 坐标接近（同行）
+          const wCenter = (w.bbox.y0 + w.bbox.y1) / 2;
+          const lCenter = (nameLabel.bbox.y0 + nameLabel.bbox.y1) / 2;
+          return Math.abs(wCenter - lCenter) <= rowTolerance &&
+                 w.bbox.x0 > nameLabel.bbox.x1; // 在标签右侧
+        });
+
+        if (candidates.length > 0) {
+          // 选最右边那个（通常是填写的内容）
+          candidates.sort((a, b) => b.bbox.x0 - a.bbox.x0);
+          const best = candidates[0];
+          rawNameText = best.text;
+          // 与名单匹配
+          detectedName = matchNameFromCandidates(best.text);
+        }
+      }
+
+      // 如果标签法失败，回退到区域扫描法
+      if (!detectedName) {
+        const fallback = scanNameByRegion(words, fullText);
+        if (fallback) {
+          detectedName = fallback;
+          rawNameText = fallback;
+        }
+      }
+
+      // ===== 定位成绩值 =====
+      let detectedScore = null;
+      if (scoreLabel) {
+        const labelTop = scoreLabel.baseline.y1 - scoreLabel.bbox.y1;
+        const rowTolerance = labelTop * 1.5;
+
+        const candidates = words.filter(w => {
+          if (!w.text) return false;
+          // 找数字（0~100）
+          const numVal = parseInt(w.text);
+          if (isNaN(numVal) || numVal < 0 || numVal > 100) return false;
+          const wCenter = (w.bbox.y0 + w.bbox.y1) / 2;
+          const lCenter = (scoreLabel.bbox.y0 + scoreLabel.bbox.y1) / 2;
+          return Math.abs(wCenter - lCenter) <= rowTolerance &&
+                 w.bbox.x0 > scoreLabel.bbox.x1;
+        });
+
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => b.bbox.x0 - a.bbox.x0);
+          detectedScore = candidates[0].text;
+          rawScoreText = detectedScore;
+        }
+      }
+
+      // 成绩标签法失败，扫描全图最大数字
+      if (!detectedScore) {
+        const nums = extractNumbers(fullText);
+        for (const n of nums) {
+          const v = parseInt(n);
+          if (v >= 0 && v <= 100) {
+            detectedScore = n;
+            rawScoreText = n;
+            break;
+          }
+        }
+      }
+
+      return { name: detectedName, score: detectedScore, rawNameText, rawScoreText };
+    }
+
+    // ===== 回退法：按名单在姓名区域扫描最匹配的词 =====
+    function scanNameByRegion(words, fullText) {
+      if (studentNames.length === 0) return null;
+
+      // 取画面中间偏左的区域（20%~65%宽，20%~75%高）
+      // 找这个区域内的汉字词
+      const chineseWords = words
+        .filter(w => {
+          if (!w.text) return false;
+          if (!/[\u4e00-\u9fff]/.test(w.text)) return false;
+          if (w.text === '姓名' || w.text === '成绩' || w.text === '学号' ||
+              w.text === '实验' || w.text === '分数' || w.text === '总分') return false;
+          // 2~4个汉字
+          if (w.text.length < 2 || w.text.length > 4) return false;
+          return true;
+        })
+        .sort((a, b) => b.confidence - a.confidence); // 按置信度排序
+
+      // 先找高置信度的
+      const highConf = chineseWords.filter(w => (w.confidence || 0) >= 60);
+      if (highConf.length > 0) {
+        for (const w of highConf) {
+          const matched = matchNameFromCandidates(w.text);
+          if (matched) return matched;
+        }
+      }
+
+      // 按置信度扫描
+      for (const w of chineseWords) {
+        const matched = matchNameFromCandidates(w.text);
+        if (matched) return matched;
+      }
+
+      return null;
+    }
+
+    // ===== 名字匹配（结合名单）=====
+    function matchNameFromCandidates(ocrText) {
+      if (!ocrText || studentNames.length === 0) return null;
+
+      const text = ocrText.trim();
+      const allChinese = [...new Set([...text].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('');
+      const words2to4 = text.match(/[\u4e00-\u9fff]{2,4}/g) || [];
+
+      const candidates = [];
+
+      for (const cn of studentNames) {
+        // 策略1：名单中的名字完整包含于 OCR 结果
+        if (text.includes(cn)) {
+          candidates.push({ name: cn, score: 100 });
+          continue;
+        }
+        // 策略2：OCR 结果包含于名单
+        if (cn.includes(text) && text.length >= 2) {
+          candidates.push({ name: cn, score: 95 });
+          continue;
+        }
+        // 策略3：编辑距离 <= 1
+        for (const word of words2to4) {
+          if (Math.abs(cn.length - word.length) <= 1) {
+            const dist = levenshtein(cn, word);
+            if (dist <= 1) {
+              candidates.push({ name: cn, score: 90 - dist * 10 });
+              break;
+            }
+          }
+        }
+        // 策略4：≥2个相同汉字
+        if (!candidates.find(c => c.name === cn)) {
+          let matchCount = 0;
+          for (const char of cn) {
+            if (allChinese.includes(char)) matchCount++;
+          }
+          if (matchCount >= 2) {
+            candidates.push({ name: cn, score: 50 + matchCount * 10 });
+          }
+        }
+      }
+
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0];
+      }
+
+      return null;
     }
 
     // ===== 分析 OCR 结果（姓名和成绩分开分析）=====
@@ -695,8 +857,9 @@
       return { name: bestName, score: bestScore, rawNameText: nameText, rawScoreText: scoreText };
     }
 
-    function displayResult(nameText, scoreText, nameOcrData, scoreOcrData) {
-      const { name, score, rawNameText, rawScoreText } = analyzeOCR(nameText, scoreText);
+    function displayResult(detectedName, detectedScore, rawNameText, rawScoreText) {
+      const name = detectedName;
+      const score = detectedScore;
       document.getElementById('result-card').style.display = 'block';
 
       const nameEl = document.getElementById('result-name');
@@ -705,12 +868,12 @@
       const confScore = document.getElementById('conf-score');
 
       if (name) {
-        nameEl.textContent = name.name;
+        nameEl.textContent = typeof name === 'string' ? name : name.name;
+        const nameScore = typeof name === 'string' ? 100 : (name.score || 0);
         nameEl.className = 'result-value';
-        confName.style.width = name.score + '%';
+        confName.style.width = nameScore + '%';
       } else {
-        // 未匹配到，显示原始识别文字供手动修正
-        const rawDisplay = extractChineseRaw(rawNameText);
+        const rawDisplay = rawNameText ? [...new Set([...rawNameText].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('') : '';
         nameEl.textContent = rawDisplay.length >= 2 ? rawDisplay : '未识别到姓名';
         nameEl.className = rawDisplay.length >= 2 ? 'result-value' : 'result-value empty';
         confName.style.width = '0%';
@@ -721,25 +884,17 @@
         scoreEl.className = 'result-value';
         confScore.style.width = '90%';
       } else {
-        const rawScore = extractNumbers(rawScoreText).join(', ');
-        scoreEl.textContent = rawScore.length > 0 ? rawScore : '未识别到成绩';
-        scoreEl.className = rawScore.length > 0 ? 'result-value' : 'result-value empty';
+        scoreEl.textContent = '未识别到成绩';
+        scoreEl.className = 'result-value empty';
         confScore.style.width = '0%';
       }
 
-      document.getElementById('btn-confirm').disabled = !name;
-      setStatus(name ? '识别完成，请核对后确认' : '未识别到姓名，请重新拍照', name ? 'ok' : 'err');
+      const nameOk = name !== null && name !== undefined;
+      document.getElementById('btn-confirm').disabled = !nameOk;
+      setStatus(nameOk ? '识别完成，请核对后确认' : '未识别到姓名，请重新拍照', nameOk ? 'ok' : 'err');
     }
 
     // ===== 辅助函数 =====
-    // 提取连续汉字词（2~4字）
-    function extractChineseWords(text) {
-      const words = [];
-      // 提取所有2~4个连续汉字的词
-      const matches = text.match(/[\u4e00-\u9fff]{2,4}/g) || [];
-      for (const m of matches) {
-        if (m !== '姓名' && m !== '成绩' && m !== '学号' && m !== '分数' && m !== '实验') {
-          words.push(m);
         }
       }
       return words;

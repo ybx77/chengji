@@ -848,15 +848,17 @@
         if (ssFile) {
           const ssXml = await ssFile.async('string');
           const ssDoc = parser.parseFromString(ssXml, 'text/xml');
-          // getElementsByTagName 不受命名空间影响
           Array.from(ssDoc.getElementsByTagName('t')).forEach(t => {
             sharedStrings.push(t.textContent.trim());
           });
         }
 
-        // 精确找姓名列和成绩列索引（getElementsByTagName 不受 XML 命名空间影响）
         const allRows = doc.getElementsByTagName('row');
-        if (allRows.length === 0) continue;
+        console.log(`[loadExcel] sheet=${sheetFile}, 行数=${allRows.length}`);
+        if (allRows.length === 0) {
+          console.log('[loadExcel] 未找到 row，打印 XML 前500:', xml.slice(0, 500));
+          continue;
+        }
 
         let nameColIdx = -1, scoreColIdx = -1;
         excelHeaders = []; // 重置表头

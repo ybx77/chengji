@@ -525,6 +525,7 @@
     let studentNames = [];         // 姓名列表
     let worker = null;
     let _lastCandidates = [];     // 上一次的候选列表
+    let isRecognizing = false;     // 防止重复识别
 
     // 原始 Excel 数据（用于导出时写入）
     let originalExcelBuffer = null; // ArrayBuffer
@@ -592,9 +593,11 @@
 
     // ===== 拍照并识别 =====
     async function captureAndRecognize() {
+      if (isRecognizing) return;                          // 防重入
       if (!worker) { setStatus('OCR 正在初始化，请稍候', 'loading'); return; }
       if (!cameraOn) { setStatus('请先打开摄像头', 'err'); return; }
 
+      isRecognizing = true;
       const btn = document.getElementById('btn-capture');
       btn.disabled = true;
       btn.classList.add('loading');
@@ -609,17 +612,24 @@
         const sx = Math.floor(fullW * 0.05), sy = Math.floor(fullH * 0.30);
         const sw = Math.floor(fullW * 0.45), sh = Math.floor(fullH * 0.45);
 
-        // 用两个尺度识别，选候选最丰富的那个
-        const scales = [2, 4];
+        // 先用 scale=4 识别（更高清）；若已找到姓名候选则跳过第二次
+        const scales = [4, 2];
         let allCandidates = [];
 
-        for (const scale of scales) {
+        for (let i = 0; i < scales.length; i++) {
+          const scale = scales[i];
           const dataUrl = cropAndPreprocess(sx, sy, sw, sh, scale);
           const result = await worker.recognize(dataUrl);
           const text = result.data.text.trim().replace(/[^\u4e00-\u9fff]/g, '');
           if (text) {
             const cands = rankCandidates(text);
-            if (cands.length > allCandidates.length) allCandidates = cands;
+            if (cands.length > 0) {
+              allCandidates = cands;
+              // 最高分候选 ≥85 分时认为足够准确，跳过后续 scale
+              if (cands[0].score >= 85 && i < scales.length - 1) break;
+            } else if (allCandidates.length === 0) {
+              allCandidates = cands;
+            }
           }
         }
 
@@ -630,6 +640,7 @@
       } finally {
         btn.disabled = false;
         btn.classList.remove('loading');
+        isRecognizing = false;
       }
     }
 
@@ -1006,21 +1017,8 @@
         // 修改 worksheet
         const doc = new DOMParser().parseFromString(wsXml, 'text/xml');
 
-        // 找成绩列（从第一行表头）
-        const headerRow = doc.querySelector('row');
-        let scoreColIdx = -1;
-        if (headerRow) {
-          const cells = [...headerRow.querySelectorAll('c')];
-          for (let ci = 0; ci < cells.length; ci++) {
-            let val = '';
-            const t = cells[ci].getAttribute('t');
-            if (t === 's') val = sharedStrings[parseInt(cells[ci].querySelector('v')?.textContent || '0')] || '';
-            else val = cells[ci].querySelector('v')?.textContent || '';
-            if (val.includes('成绩') || val.includes('得分')) { scoreColIdx = ci; break; }
-          }
-        }
-
-        const colLetter = scoreColIdx >= 0 ? String.fromCharCode(65 + scoreColIdx) : 'B';
+        // 使用 loadExcel 时记录的列索引
+        const colLetter = scoreColIndex >= 0 ? String.fromCharCode(65 + scoreColIndex) : 'B';
 
         // 写入成绩
         for (const row of studentRows) {

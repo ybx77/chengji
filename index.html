@@ -510,6 +510,7 @@
     <div class="export-row">
       <button class="btn btn-secondary" style="flex:1" onclick="exportExcel()">导出 Excel</button>
       <button class="btn btn-secondary" style="flex:1" onclick="clearRecords()">清空记录</button>
+      <button class="btn btn-secondary" style="flex:1" onclick="debugExport()">诊断导出</button>
     </div>
   </div>
 
@@ -1044,6 +1045,27 @@
       return { ok: true };
     }
 
+    // ===== 诊断导出：下载数据状态 JSON =====
+    function debugExport() {
+      const data = {
+        scoreColIndex,
+        enteredNames: [...enteredNames],
+        studentRows: studentRows.map(r => ({
+          name: r.name,
+          rowIndex: r.rowIndex,
+          hasScore: r.hasScore,
+          entered: r.entered,
+          score: r.score,
+        })),
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'debug.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
     // ===== 导出修改后的 Excel =====
     async function exportExcel() {
       if (enteredNames.size === 0) { alert('没有可导出的录入记录'); return; }
@@ -1092,10 +1114,16 @@
           setStatus('导出失败：未指定成绩列', 'err');
           return;
         }
-        for (const row of studentRows) {
-          if (!row.entered || colLetter === null) continue;
+
+        // 调试：统计本次录入的记录
+        const toWrite = studentRows.filter(r => r.entered);
+        console.log('本次录入记录：', toWrite);
+        console.log('成绩列:', colLetter, 'scoreColIndex:', scoreColIndex);
+
+        for (const row of toWrite) {
           const excelRow = row.rowIndex + 1;
           const targetRow = doc.querySelector(`row[r="${excelRow}"]`);
+          console.log(`写入 ${row.name} → Excel行${excelRow}，找到行节点:`, !!targetRow);
           if (!targetRow) continue;
 
           const cellRef = `${colLetter}${excelRow}`;

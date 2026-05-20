@@ -74,11 +74,6 @@
       border-color: rgba(100, 255, 150, 0.6);
     }
 
-    #guide-score {
-      top: 40%; right: 5%; width: 45%; height: 35%;
-      border-color: rgba(255, 200, 100, 0.6);
-    }
-
     .guide-label {
       position: absolute;
       top: -22px;
@@ -91,7 +86,6 @@
     }
 
     #guide-name .guide-label { background: rgba(100, 255, 150, 0.2); color: #6dffaa; }
-    #guide-score .guide-label { background: rgba(255, 200, 100, 0.2); color: #ffcc66; }
 
     .guide-hint {
       position: absolute;
@@ -477,11 +471,13 @@
     // ===== 全局状态 =====
     let stream = null;
     let cameraOn = false;
-    let studentNames = [];
-    let records = [];
-    let currentScore = 80;
-
+    let studentNames = [];         // 姓名列表
     let worker = null;
+
+    // 原始 Excel 数据（用于导出时写入）
+    let originalExcelBuffer = null; // ArrayBuffer
+    let scoreColIndex = -1;        // 成绩列索引（0-based）
+    let studentRows = [];          // [{rowIndex, name, hasScore}]
 
     const video  = document.getElementById('video');
     const canvas = document.getElementById('canvas');
@@ -556,10 +552,14 @@
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        // 截取姓名区域 + 灰度二值化（放大3倍）
+        const fullW = canvas.width, fullH = canvas.height;
+        const sx = Math.floor(fullW * 0.05), sy = Math.floor(fullH * 0.30);
+        const sw = Math.floor(fullW * 0.45), sh = Math.floor(fullH * 0.45);
+        const dataUrl = cropAndPreprocess(sx, sy, sw, sh, 3);
         setStatus('正在识别...', 'loading');
         const result = await worker.recognize(dataUrl);
-        const text  = result.data.text;
+        const text  = result.data.text.trim();
         const words = result.data.words || [];
 
         setStatus('正在匹配名单...', 'loading');
@@ -572,6 +572,24 @@
         btn.disabled = false;
         btn.classList.remove('loading');
       }
+    }
+
+    // ===== 截取姓名区域 + 图像预处理 =====
+    function cropAndPreprocess(sx, sy, sw, sh, scale) {
+      const c = document.createElement('canvas');
+      c.width  = sw * scale;
+      c.height = sh * scale;
+      const g = c.getContext('2d');
+      g.drawImage(canvas, sx, sy, sw, sh, 0, 0, c.width, c.height);
+      // 灰度 + 二值化（印刷体高对比度效果最好）
+      const imgData = g.getImageData(0, 0, c.width, c.height);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
+        d[i] = d[i+1] = d[i+2] = gray > 128 ? 255 : 0;
+      }
+      g.putImageData(imgData, 0, 0);
+      return c.toDataURL('image/png');
     }
 
     // ===== 核心匹配：容忍 OCR 错字，用字符级匹配 =====
@@ -628,37 +646,37 @@
     }
 
     // ===== 显示结果 =====
+    let pendingScore = 80; // 待录入成绩
+
     function displayResult(matchedName) {
       document.getElementById('result-card').style.display = 'block';
-      currentScore = 80;
+      pendingScore = 80;
 
       const nameEl   = document.getElementById('result-name');
       const scoreEl  = document.getElementById('result-score');
       const confName = document.getElementById('conf-name');
-      const confScore = document.getElementById('conf-score');
 
       if (matchedName) {
         nameEl.textContent = matchedName;
         nameEl.className  = 'result-value';
         confName.style.width = '100%';
+        document.getElementById('btn-confirm').disabled = false;
+        setStatus('识别完成，请核对后确认', 'ok');
       } else {
         nameEl.textContent = '未识别到姓名';
         nameEl.className  = 'result-value empty';
         confName.style.width = '0%';
+        document.getElementById('btn-confirm').disabled = true;
+        setStatus('未识别到姓名，请重新拍照', 'err');
       }
 
-      scoreEl.textContent  = '80';
-      scoreEl.className    = 'result-value';
-      confScore.style.width = '100%';
-
-      document.getElementById('btn-confirm').disabled = !matchedName;
-      setStatus(matchedName ? '识别完成，请核对后确认' : '未识别到姓名，请重新拍照', matchedName ? 'ok' : 'err');
+      scoreEl.textContent = '80';
     }
 
     // ===== 成绩增减（以5为单位）=====
     function adjustScore(delta) {
-      currentScore = Math.max(0, Math.min(100, currentScore + delta));
-      document.getElementById('result-score').textContent = currentScore;
+      pendingScore = Math.max(0, Math.min(100, pendingScore + delta));
+      document.getElementById('result-score').textContent = pendingScore;
     }
 
     // ===== 辅助函数 =====
@@ -678,16 +696,20 @@
       setStatus('请重新拍照识别', '');
     }
 
-    // ===== Excel 导入 =====
+    // ===== Excel 导入（读取姓名列 + 定位成绩列）=====
     async function loadExcel(file) {
       if (!file) return;
       document.getElementById('excel-info').textContent = '加载中...';
 
-      const buf  = await file.arrayBuffer();
+      const buf = await file.arrayBuffer();
+      originalExcelBuffer = buf.slice(0); // 克隆保存
+
       const zip  = await JSZip.loadAsync(buf);
       const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
 
       studentNames = [];
+      studentRows  = [];
+      scoreColIndex = -1;
 
       const skipWords = new Set(['姓名', '成绩', '学号', '分数', '总分', '实验', '班级', '专业', '学院', '学校', '座号', '序号', '编号', '分', '报告', '标题', '课程']);
 
@@ -699,33 +721,85 @@
         const sharedStrings = [];
         const ssFile = zip.file('xl/sharedStrings.xml');
         if (ssFile) {
-          const ssXml  = await ssFile.async('string');
-          const ssDoc  = parser.parseFromString(ssXml, 'text/xml');
+          const ssXml = await ssFile.async('string');
+          const ssDoc = parser.parseFromString(ssXml, 'text/xml');
           ssDoc.querySelectorAll('si t').forEach(t => {
             sharedStrings.push(t.textContent.trim());
           });
         }
 
-        const rows = doc.querySelectorAll('row');
-        for (const row of rows) {
-          for (const cell of row.querySelectorAll('c')) {
-            let val = '';
-            const t  = cell.getAttribute('t');
-            if (t === 's') {
-              val = sharedStrings[parseInt(cell.querySelector('v')?.textContent || '0')] || '';
-            } else {
-              val = cell.querySelector('v')?.textContent || '';
+        // 精确找姓名列和成绩列索引
+        const allRows = doc.querySelectorAll('row');
+        if (allRows.length === 0) continue;
+
+        let nameColIdx = -1, scoreColIdx = -1;
+        const headerCells = allRows[0].querySelectorAll('c');
+        headerCells.forEach((cell, ci) => {
+          let val = '';
+          const t = cell.getAttribute('t');
+          if (t === 's') {
+            val = sharedStrings[parseInt(cell.querySelector('v')?.textContent || '0')] || '';
+          } else {
+            val = cell.querySelector('v')?.textContent || '';
+          }
+          val = val.trim();
+          if (val.includes('姓名')) nameColIdx = ci;
+          if (val.includes('成绩') || val.includes('得分') || val.includes('分数')) scoreColIdx = ci;
+        });
+
+        if (nameColIdx < 0) {
+          document.getElementById('excel-info').textContent = '未找到姓名列';
+          setStatus('Excel 表头未包含"姓名"列', 'err');
+          return;
+        }
+
+        // 读取姓名列数据
+        for (let ri = 1; ri < allRows.length; ri++) {
+          const row = allRows[ri];
+          const cells = row.querySelectorAll('c');
+          if (cells.length <= nameColIdx) continue;
+
+          let nameVal = '';
+          const nameCell = cells[nameColIdx];
+          const t = nameCell?.getAttribute('t');
+          if (t === 's') {
+            nameVal = sharedStrings[parseInt(nameCell.querySelector('v')?.textContent || '0')] || '';
+          } else {
+            nameVal = nameCell?.querySelector('v')?.textContent || '';
+          }
+          nameVal = nameVal.trim();
+
+          if (nameVal.length >= 2 && nameVal.length <= 4 && /^[\u4e00-\u9fff]+$/.test(nameVal) && !skipWords.has(nameVal)) {
+            if (!studentNames.includes(nameVal)) {
+              studentNames.push(nameVal);
+              studentRows.push({ name: nameVal, rowIndex: ri, hasScore: false });
             }
-            val = val.trim();
-            if (val.length >= 2 && val.length <= 4 && /^[\u4e00-\u9fff]+$/.test(val) && !skipWords.has(val)) {
-              if (!studentNames.includes(val)) studentNames.push(val);
+          }
+
+          // 检查成绩列是否有值
+          if (scoreColIdx >= 0 && cells.length > scoreColIdx) {
+            const scoreCell = cells[scoreColIdx];
+            let scoreVal = '';
+            const st = scoreCell?.getAttribute('t');
+            if (st === 's') {
+              scoreVal = sharedStrings[parseInt(scoreCell.querySelector('v')?.textContent || '0')] || '';
+            } else {
+              scoreVal = scoreCell?.querySelector('v')?.textContent || '';
+            }
+            if (scoreVal.trim()) {
+              const sr = studentRows.find(r => r.name === nameVal);
+              if (sr) sr.hasScore = true;
             }
           }
         }
+
+        scoreColIndex = scoreColIdx;
       }
 
       studentNames = [...new Set(studentNames)];
-      document.getElementById('excel-info').textContent = studentNames.length + ' 人';
+      const loaded = studentRows.length;
+      const scored = studentRows.filter(r => r.hasScore).length;
+      document.getElementById('excel-info').textContent = `${loaded} 人（${scored} 人已有成绩）`;
       renderNameList();
       setStatus(`已加载 ${studentNames.length} 名学生`, 'ok');
     }
@@ -741,11 +815,15 @@
       ).join('') + (studentNames.length > 30 ? `<div style="font-size:12px;color:#3a3a5a;margin-top:6px">...共 ${studentNames.length} 人</div>` : '');
     }
 
-    // ===== 确认录入 =====
+    // ===== 确认录入（写入原 Excel 表格）=====
+    let enteredNames = new Set(); // 已录入的姓名
+
     function showConfirm() {
+      const name = document.getElementById('result-name').textContent;
+      if (!name || name === '未识别到姓名') { alert('请先识别姓名'); return; }
       document.getElementById('modal').classList.add('show');
-      document.getElementById('modal-name').value  = document.getElementById('result-name').textContent;
-      document.getElementById('modal-score-display').textContent = currentScore;
+      document.getElementById('modal-name').value = name;
+      document.getElementById('modal-score-display').textContent = pendingScore;
     }
 
     function closeModal() {
@@ -753,54 +831,169 @@
     }
 
     function confirmRecord() {
-      const name  = document.getElementById('modal-name').value.trim();
-      const score = currentScore;
-      if (!name)  { alert('请填写姓名'); return; }
+      const name = document.getElementById('modal-name').textContent.trim();
+      if (!name) { alert('姓名不能为空'); return; }
 
-      records.push({ name, score, time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) });
-      closeModal();
-      renderRecords();
-      document.getElementById('result-card').style.display = 'none';
-      setStatus(`「${name}」的成绩已录入`, 'ok');
-    }
-
-    function renderRecords() {
-      document.getElementById('record-count').textContent = `(${records.length})`;
-      const el = document.getElementById('record-list');
-      if (records.length === 0) {
-        el.innerHTML = '<div class="empty-hint">暂无录入记录</div>';
+      if (!originalExcelBuffer) {
+        alert('请先导入 Excel 文件');
+        closeModal();
         return;
       }
-      el.innerHTML = records.map(r =>
+
+      // 在 Excel 中找到该姓名所在行，写入成绩
+      const result = writeScoreToExcel(name, pendingScore);
+      if (!result.ok) {
+        alert(result.msg);
+        closeModal();
+        return;
+      }
+
+      enteredNames.add(name);
+      closeModal();
+      document.getElementById('result-card').style.display = 'none';
+      renderEnteredList();
+      setStatus(`「${name}」成绩已写入 Excel`, 'ok');
+    }
+
+    function renderEnteredList() {
+      const el = document.getElementById('record-list');
+      if (enteredNames.size === 0) {
+        el.innerHTML = '<div class="empty-hint">暂无录入记录</div>';
+        document.getElementById('record-count').textContent = '(0)';
+        return;
+      }
+      const arr = [...enteredNames];
+      el.innerHTML = arr.map(n =>
         `<div class="record-item">
-          <span class="record-name">${r.name}</span>
-          <span class="record-score">${r.score}</span>
-          <span class="record-time">${r.time}</span>
+          <span class="record-name">${n}</span>
+          <span class="record-score">✓</span>
         </div>`
       ).join('');
+      document.getElementById('record-count').textContent = `(${arr.length})`;
     }
 
     function clearRecords() {
       if (!confirm('确定清空所有录入记录？')) return;
-      records = [];
-      renderRecords();
+      enteredNames = new Set();
+      // 重置 Excel 写入状态
+      studentRows.forEach(r => r.entered = false);
+      renderEnteredList();
       setStatus('已清空记录', '');
     }
 
-    // ===== 导出 Excel =====
-    function exportExcel() {
-      if (records.length === 0) { alert('没有可导出的记录'); return; }
-      let csv = '\uFEFF姓名,成绩,录入时间\n';
-      for (const r of records) {
-        csv += `${r.name},${r.score},${r.time}\n`;
+    // ===== 写入成绩到 Excel（内存修改）=====
+    function writeScoreToExcel(name, score) {
+      const targetRow = studentRows.find(r => r.name === name);
+      if (!targetRow) return { ok: false, msg: `名单中未找到「${name}」` };
+      if (targetRow.hasScore) {
+        // 已有成绩，是否覆盖？
+        if (!confirm(`「${name}」已有成绩，确认覆盖吗？`)) {
+          return { ok: false, msg: '已取消' };
+        }
       }
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
-      a.download = `成绩录入_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.csv`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      setStatus(`已导出 ${records.length} 条记录`, 'ok');
+      targetRow.score = score;
+      targetRow.entered = true;
+      return { ok: true };
+    }
+
+    // ===== 导出修改后的 Excel =====
+    async function exportExcel() {
+      if (enteredNames.size === 0) { alert('没有可导出的录入记录'); return; }
+      if (!originalExcelBuffer) { alert('未找到原始 Excel，请重新导入'); return; }
+
+      try {
+        const zip = await JSZip.loadAsync(originalExcelBuffer);
+        const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
+        const sheetFile = sheets[0];
+        const wsXml = await zip.file(sheetFile).async('string');
+
+        // 读取 sharedStrings
+        const sharedStrings = [];
+        const ssFile = zip.file('xl/sharedStrings.xml');
+        if (ssFile) {
+          const ssDoc = new DOMParser().parseFromString(await ssFile.async('string'), 'text/xml');
+          ssDoc.querySelectorAll('si t').forEach(t => sharedStrings.push(t.textContent));
+        }
+
+        // 为成绩建立 sharedString 索引
+        const scoreIdxMap = new Map();
+        for (const row of studentRows) {
+          if (!row.entered) continue;
+          const s = String(row.score);
+          let idx = sharedStrings.indexOf(s);
+          if (idx < 0) { idx = sharedStrings.length; sharedStrings.push(s); }
+          scoreIdxMap.set(row.name, idx);
+        }
+
+        // 重建 sharedStrings.xml
+        const ssLines = [`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`];
+        ssLines.push(`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sharedStrings.length}" uniqueCount="${sharedStrings.length}">`);
+        for (const s of sharedStrings) {
+          ssLines.push(`<si><t xml:space="preserve">${s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</t></si>`);
+        }
+        ssLines.push('</sst>');
+        zip.file('xl/sharedStrings.xml', ssLines.join(''));
+
+        // 修改 worksheet
+        const doc = new DOMParser().parseFromString(wsXml, 'text/xml');
+
+        // 找成绩列（从第一行表头）
+        const headerRow = doc.querySelector('row');
+        let scoreColIdx = -1;
+        if (headerRow) {
+          const cells = [...headerRow.querySelectorAll('c')];
+          for (let ci = 0; ci < cells.length; ci++) {
+            let val = '';
+            const t = cells[ci].getAttribute('t');
+            if (t === 's') val = sharedStrings[parseInt(cells[ci].querySelector('v')?.textContent || '0')] || '';
+            else val = cells[ci].querySelector('v')?.textContent || '';
+            if (val.includes('成绩') || val.includes('得分')) { scoreColIdx = ci; break; }
+          }
+        }
+
+        const colLetter = scoreColIdx >= 0 ? String.fromCharCode(65 + scoreColIdx) : 'B';
+
+        // 写入成绩
+        for (const row of studentRows) {
+          if (!row.entered) continue;
+          const excelRow = row.rowIndex + 1;
+          const targetRow = doc.querySelector(`row[r="${excelRow}"]`);
+          if (!targetRow) continue;
+
+          const cellRef = `${colLetter}${excelRow}`;
+          const ssi = scoreIdxMap.get(row.name);
+          let cell = targetRow.querySelector(`c[r="${cellRef}"]`);
+          if (cell) {
+            cell.setAttribute('t', 's');
+            const v = cell.querySelector('v');
+            if (v) v.textContent = ssi; else { cell.textContent = ''; cell.appendChild(doc.createElement('v')).textContent = ssi; }
+          } else {
+            cell = doc.createElement('c');
+            cell.setAttribute('r', cellRef);
+            cell.setAttribute('t', 's');
+            cell.appendChild(doc.createElement('v')).textContent = ssi;
+            const cs = [...targetRow.querySelectorAll('c')];
+            let ins = false;
+            for (const c of cs) {
+              const cr = c.getAttribute('r') || '';
+              if (cr.replace(/\d/g, '') > colLetter) { c.before(cell); ins = true; break; }
+            }
+            if (!ins) targetRow.appendChild(cell);
+          }
+        }
+
+        zip.file(sheetFile, new XMLSerializer().serializeToString(doc));
+        const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', compression: 'DEFLATE' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `成绩已录入.xlsx`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        setStatus(`已导出 ${enteredNames.size} 条成绩`, 'ok');
+      } catch (e) {
+        alert('导出失败：' + e.message);
+        setStatus('导出失败', 'err');
+      }
     }
   </script>
 

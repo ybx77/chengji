@@ -848,31 +848,37 @@
         if (ssFile) {
           const ssXml = await ssFile.async('string');
           const ssDoc = parser.parseFromString(ssXml, 'text/xml');
-          ssDoc.querySelectorAll('si t').forEach(t => {
+          // getElementsByTagName 不受命名空间影响
+          ssDoc.getElementsByTagName('t').forEach(t => {
             sharedStrings.push(t.textContent.trim());
           });
         }
 
-        // 精确找姓名列和成绩列索引
-        const allRows = doc.querySelectorAll('row');
+        // 精确找姓名列和成绩列索引（getElementsByTagName 不受 XML 命名空间影响）
+        const allRows = doc.getElementsByTagName('row');
         if (allRows.length === 0) continue;
 
         let nameColIdx = -1, scoreColIdx = -1;
         excelHeaders = []; // 重置表头
-        const headerCells = allRows[0].querySelectorAll('c');
-        headerCells.forEach((cell, ci) => {
+        // 取第一行（表头行）所有单元格
+        const headerRow = allRows[0];
+        const headerCells = headerRow.getElementsByTagName('c');
+        for (let ci = 0; ci < headerCells.length; ci++) {
+          const cell = headerCells[ci];
           let val = '';
           const t = cell.getAttribute('t');
           if (t === 's') {
-            val = sharedStrings[parseInt(cell.querySelector('v')?.textContent || '0')] || '';
+            const vEl = cell.getElementsByTagName('v')[0];
+            val = sharedStrings[parseInt(vEl?.textContent || '0')] || '';
           } else {
-            val = cell.querySelector('v')?.textContent || '';
+            const vEl = cell.getElementsByTagName('v')[0];
+            val = vEl?.textContent || '';
           }
           val = val.trim();
           excelHeaders.push({ idx: ci, name: val });
           if (val.includes('姓名')) nameColIdx = ci;
           if (val.includes('成绩') || val.includes('得分') || val.includes('分数')) scoreColIdx = ci;
-        });
+        }
 
         // 填充手动选列下拉框
         const sel = document.getElementById('col-select');
@@ -893,16 +899,18 @@
         // 读取姓名列数据
         for (let ri = 1; ri < allRows.length; ri++) {
           const row = allRows[ri];
-          const cells = row.querySelectorAll('c');
+          const cells = row.getElementsByTagName('c');
           if (cells.length <= nameColIdx) continue;
 
           let nameVal = '';
           const nameCell = cells[nameColIdx];
           const t = nameCell?.getAttribute('t');
           if (t === 's') {
-            nameVal = sharedStrings[parseInt(nameCell.querySelector('v')?.textContent || '0')] || '';
+            const vEl = nameCell.getElementsByTagName('v')[0];
+            nameVal = sharedStrings[parseInt(vEl?.textContent || '0')] || '';
           } else {
-            nameVal = nameCell?.querySelector('v')?.textContent || '';
+            const vEl = nameCell.getElementsByTagName('v')[0];
+            nameVal = vEl?.textContent || '';
           }
           nameVal = nameVal.trim();
 
@@ -919,9 +927,11 @@
             let scoreVal = '';
             const st = scoreCell?.getAttribute('t');
             if (st === 's') {
-              scoreVal = sharedStrings[parseInt(scoreCell.querySelector('v')?.textContent || '0')] || '';
+              const svEl = scoreCell.getElementsByTagName('v')[0];
+              scoreVal = sharedStrings[parseInt(svEl?.textContent || '0')] || '';
             } else {
-              scoreVal = scoreCell?.querySelector('v')?.textContent || '';
+              const svEl = scoreCell.getElementsByTagName('v')[0];
+              scoreVal = svEl?.textContent || '';
             }
             if (scoreVal.trim()) {
               const sr = studentRows.find(r => r.name === nameVal);
@@ -1082,7 +1092,8 @@
         const ssFile = zip.file('xl/sharedStrings.xml');
         if (ssFile) {
           const ssDoc = new DOMParser().parseFromString(await ssFile.async('string'), 'text/xml');
-          ssDoc.querySelectorAll('si t').forEach(t => sharedStrings.push(t.textContent));
+          // getElementsByTagName 不受命名空间影响
+          ssDoc.getElementsByTagName('t').forEach(t => sharedStrings.push(t.textContent));
         }
 
         // 为成绩建立 sharedString 索引
@@ -1115,48 +1126,71 @@
           return;
         }
 
-        // 调试：统计本次录入的记录
+        // 统计本次录入的记录
         const toWrite = studentRows.filter(r => r.entered);
         console.log('本次录入记录：', toWrite);
-        console.log('成绩列:', colLetter, 'scoreColIndex:', scoreColIndex);
 
-        // 调试：打印 worksheet 前10行和所有行的 r 属性
-        const allRows = doc.querySelectorAll('row');
-        const rowRefs = [...allRows].map(r => r.getAttribute('r')).slice(0, 15);
-        console.log('Worksheet 前15行 r 属性:', rowRefs);
-        console.log('Worksheet 总行数:', allRows.length);
-
-        // 关键诊断：吴加申在 rowIndex=100，对应 Excel row=101，找得到吗？
-        const testRow = doc.querySelector('row[r="101"]');
-        console.log('row[r="101"] 找到:', !!testRow, testRow ? testRow.outerHTML.slice(0, 200) : 'null');
-        const testRow2 = doc.querySelector('row[r="100"]');
-        console.log('row[r="100"] 找到:', !!testRow2, testRow2 ? testRow2.outerHTML.slice(0, 200) : 'null');
+        // getElementsByTagName 不受 XML 命名空间影响
+        const allRows = doc.getElementsByTagName('row');
 
         for (const row of toWrite) {
           const excelRow = row.rowIndex + 1;
-          const targetRow = doc.querySelector(`row[r="${excelRow}"]`);
+
+          // 查找对应行号的 row 节点
+          let targetRow = null;
+          for (let i = 0; i < allRows.length; i++) {
+            if (allRows[i].getAttribute('r') === String(excelRow)) {
+              targetRow = allRows[i];
+              break;
+            }
+          }
           console.log(`写入 ${row.name} → Excel行${excelRow}，找到行节点:`, !!targetRow);
           if (!targetRow) continue;
 
           const cellRef = `${colLetter}${excelRow}`;
           const ssi = scoreIdxMap.get(row.name);
-          let cell = targetRow.querySelector(`c[r="${cellRef}"]`);
+
+          // 查找或创建单元格
+          const existingCells = targetRow.getElementsByTagName('c');
+          let cell = null;
+          for (let ci = 0; ci < existingCells.length; ci++) {
+            if (existingCells[ci].getAttribute('r') === cellRef) {
+              cell = existingCells[ci];
+              break;
+            }
+          }
+
           if (cell) {
             cell.setAttribute('t', 's');
-            const v = cell.querySelector('v');
-            if (v) v.textContent = ssi; else { cell.textContent = ''; cell.appendChild(doc.createElement('v')).textContent = ssi; }
+            const vEls = cell.getElementsByTagName('v');
+            if (vEls.length > 0) {
+              vEls[0].textContent = ssi;
+            } else {
+              const v = doc.createElement('v');
+              v.textContent = ssi;
+              cell.appendChild(v);
+            }
           } else {
             cell = doc.createElement('c');
             cell.setAttribute('r', cellRef);
             cell.setAttribute('t', 's');
-            cell.appendChild(doc.createElement('v')).textContent = ssi;
-            const cs = [...targetRow.querySelectorAll('c')];
-            let ins = false;
-            for (const c of cs) {
-              const cr = c.getAttribute('r') || '';
-              if (cr.replace(/\d/g, '') > colLetter) { c.before(cell); ins = true; break; }
+            const v = doc.createElement('v');
+            v.textContent = ssi;
+            cell.appendChild(v);
+
+            // 按列字母顺序插入
+            const cells = targetRow.getElementsByTagName('c');
+            let inserted = false;
+            for (let ci = 0; ci < cells.length; ci++) {
+              const cr = cells[ci].getAttribute('r') || '';
+              const col = cr.replace(/\d/g, '');
+              if (col > colLetter) {
+                cells[ci].before(cell);
+                inserted = true;
+                break;
+              }
             }
-            if (!ins) targetRow.appendChild(cell);
+            if (!inserted) targetRow.appendChild(cell);
           }
         }
 

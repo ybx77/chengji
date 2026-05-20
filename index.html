@@ -1120,6 +1120,18 @@
         console.log('本次录入记录：', toWrite);
         console.log('成绩列:', colLetter, 'scoreColIndex:', scoreColIndex);
 
+        // 调试：打印 worksheet 前10行和所有行的 r 属性
+        const allRows = doc.querySelectorAll('row');
+        const rowRefs = [...allRows].map(r => r.getAttribute('r')).slice(0, 15);
+        console.log('Worksheet 前15行 r 属性:', rowRefs);
+        console.log('Worksheet 总行数:', allRows.length);
+
+        // 关键诊断：吴加申在 rowIndex=100，对应 Excel row=101，找得到吗？
+        const testRow = doc.querySelector('row[r="101"]');
+        console.log('row[r="101"] 找到:', !!testRow, testRow ? testRow.outerHTML.slice(0, 200) : 'null');
+        const testRow2 = doc.querySelector('row[r="100"]');
+        console.log('row[r="100"] 找到:', !!testRow2, testRow2 ? testRow2.outerHTML.slice(0, 200) : 'null');
+
         for (const row of toWrite) {
           const excelRow = row.rowIndex + 1;
           const targetRow = doc.querySelector(`row[r="${excelRow}"]`);

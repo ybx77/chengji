@@ -849,7 +849,7 @@
           const ssXml = await ssFile.async('string');
           const ssDoc = parser.parseFromString(ssXml, 'text/xml');
           // getElementsByTagName 不受命名空间影响
-          ssDoc.getElementsByTagName('t').forEach(t => {
+          Array.from(ssDoc.getElementsByTagName('t')).forEach(t => {
             sharedStrings.push(t.textContent.trim());
           });
         }
@@ -1093,7 +1093,7 @@
         if (ssFile) {
           const ssDoc = new DOMParser().parseFromString(await ssFile.async('string'), 'text/xml');
           // getElementsByTagName 不受命名空间影响
-          ssDoc.getElementsByTagName('t').forEach(t => sharedStrings.push(t.textContent));
+          Array.from(ssDoc.getElementsByTagName('t')).forEach(t => sharedStrings.push(t.textContent));
         }
 
         // 为成绩建立 sharedString 索引

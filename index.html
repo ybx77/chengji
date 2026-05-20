@@ -831,6 +831,8 @@
 
       const zip  = await JSZip.loadAsync(buf);
       const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
+      console.log('[loadExcel] ZIP 内所有 XML 文件:', Object.keys(zip.files));
+      console.log('[loadExcel] 被识别为 sheet 的文件:', sheets);
 
       studentNames = [];
       studentRows  = [];

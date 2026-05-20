@@ -389,9 +389,6 @@
       <div id="guide-name" class="guide-box">
         <span class="guide-label">姓名</span>
       </div>
-      <div id="guide-score" class="guide-box">
-        <span class="guide-label">成绩</span>
-      </div>
       <div class="guide-hint">将实验报告对准虚线框</div>
     </div>
     <div class="btn-row">
@@ -577,89 +574,54 @@
       }
     }
 
-    // ===== 核心匹配：利用词位置 + 名单交叉验证 =====
+    // ===== 核心匹配：容忍 OCR 错字，用字符级匹配 =====
     function findBestMatch(words, fullText) {
       if (studentNames.length === 0) return null;
 
-      // 策略1：标签定位法（找"姓名"右侧的词）
-      const nameLabel = words.find(w =>
-        w.text === '姓名' || w.text === '姓名：' || w.text === '姓名:' ||
-        w.text === '学生姓名' || (w.text.includes('姓名') && w.text.length <= 4)
-      );
+      // 提取图中所有汉字（即使 OCR 输出混乱也尽量还原）
+      const allChars = [...new Set([...fullText].filter(c => /[\u4e00-\u9fff]/.test(c)))];
 
-      if (nameLabel) {
-        const labelH = nameLabel.baseline.y1 - nameLabel.bbox.y1;
-        const tolerance = Math.max(labelH * 1.5, 10);
-
-        const candidates = words.filter(w => {
-          if (!w.text || !/[\u4e00-\u9fff]/.test(w.text)) return false;
-          if (['姓名', '姓名：', '姓名:', '学生姓名'].includes(w.text)) return false;
-          const wCenter = (w.bbox.y0 + w.bbox.y1) / 2;
-          const lCenter = (nameLabel.bbox.y0 + nameLabel.bbox.y1) / 2;
-          return Math.abs(wCenter - lCenter) <= tolerance && w.bbox.x0 > nameLabel.bbox.x1;
-        });
-
-        if (candidates.length > 0) {
-          candidates.sort((a, b) => b.bbox.x0 - a.bbox.x0);
-          const best = candidates[0];
-          const matched = matchName(best.text);
-          if (matched) return matched;
-        }
-      }
-
-      // 策略2：按置信度扫描所有汉字词
-      const chineseWords = words
-        .filter(w => {
-          if (!w.text) return false;
-          if (!/[\u4e00-\u9fff]/.test(w.text)) return false;
-          if (['姓名', '成绩', '学号', '实验', '分数', '总分'].includes(w.text)) return false;
-          return w.text.length >= 2 && w.text.length <= 4;
-        })
+      // 提取高置信度的 2~4 字汉字词（优先用）
+      const highConfWords = words
+        .filter(w => w.text && /[\u4e00-\u9fff]{2,4}/.test(w.text) && (w.confidence || 0) >= 55)
         .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
 
-      for (const w of chineseWords) {
-        const matched = matchName(w.text);
-        if (matched) return matched;
-      }
+      const candidates = [];
 
-      // 策略3：名单中一定有 → 用编辑距离最接近的
-      const allChinese = [...new Set([...fullText].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('');
-      if (allChinese.length >= 2) {
-        let best = null, bestDist = 99;
-        for (const cn of studentNames) {
-          const dist = levenshtein(cn, allChinese);
-          if (dist < bestDist) { bestDist = dist; best = cn; }
+      for (const cn of studentNames) {
+        // 策略A：高置信度词精确包含名单
+        for (const w of highConfWords) {
+          if (w.text.includes(cn)) {
+            candidates.push({ name: cn, score: 100 });
+            break;
+          }
         }
-        if (best && bestDist <= 2) return best;
-      }
+        if (candidates.find(c => c.name === cn)) continue;
 
-      return null;
-    }
+        // 策略B：编辑距离 <= 1（在候选词中）
+        for (const w of highConfWords) {
+          if (Math.abs(cn.length - w.text.length) <= 1 && levenshtein(cn, w.text) <= 1) {
+            candidates.push({ name: cn, score: 90 });
+            break;
+          }
+        }
+        if (candidates.find(c => c.name === cn)) continue;
 
-    // ===== 名字与名单匹配（返回名单中的名字或 null）=====
-    function matchName(ocrText) {
-      if (!ocrText || studentNames.length === 0) return null;
-      const text = ocrText.trim();
-
-      for (const cn of studentNames) {
-        // 精确包含
-        if (text.includes(cn) || cn.includes(text)) return cn;
-      }
-
-      // 编辑距离 <= 1
-      for (const cn of studentNames) {
-        if (Math.abs(cn.length - text.length) <= 1 && levenshtein(cn, text) <= 1) {
-          return cn;
+        // 策略C：字符级匹配容忍错字
+        // 统计名单中有多少个字在 allChars 中
+        let matchCount = 0;
+        for (const ch of cn) {
+          if (allChars.includes(ch)) matchCount++;
+        }
+        const ratio = matchCount / cn.length;
+        if (ratio >= 0.8) { // 至少 80% 的字对上了
+          candidates.push({ name: cn, score: Math.round(ratio * 100) });
         }
       }
 
-      // ≥2个相同汉字
-      for (const cn of studentNames) {
-        let match = 0;
-        for (const char of cn) {
-          if (text.includes(char)) match++;
-        }
-        if (match >= 2) return cn;
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0].name;
       }
 
       return null;
@@ -716,7 +678,7 @@
       setStatus('请重新拍照识别', '');
     }
 
-    // ===== Excel 导入 =====
+    // ===== Excel 导入（只读取姓名列）=====
     async function loadExcel(file) {
       if (!file) return;
       document.getElementById('excel-info').textContent = '加载中...';
@@ -742,9 +704,12 @@
           });
         }
 
-        const rows = doc.querySelectorAll('row');
-        for (const row of rows) {
-          for (const cell of row.querySelectorAll('c')) {
+        // 找姓名列的列索引（扫描第一行）
+        const firstRow = doc.querySelector('row');
+        let nameColIndex = -1;
+        if (firstRow) {
+          const cells = firstRow.querySelectorAll('c');
+          for (const cell of cells) {
             let val = '';
             const t  = cell.getAttribute('t');
             if (t === 's') {
@@ -753,6 +718,40 @@
               val = cell.querySelector('v')?.textContent || '';
             }
             val = val.trim();
+            // 表头包含"姓名"关键词
+            if (val.includes('姓名')) {
+              const colRef = cell.getAttribute('r') || '';
+              nameColIndex = colRef ? colRef.charCodeAt(0) - 65 : -1; // 简单处理 A=0, B=1...
+              break;
+            }
+          }
+        }
+
+        // 如果没找到，返回提示
+        if (nameColIndex < 0) {
+          document.getElementById('excel-info').textContent = '未找到姓名列';
+          setStatus('Excel 中未找到"姓名"列，请确认表头包含"姓名"', 'err');
+          return;
+        }
+
+        // 只读姓名列的数据（跳过第一行表头）
+        const allRows = doc.querySelectorAll('row');
+        for (let i = 1; i < allRows.length; i++) {
+          const cells = allRows[i].querySelectorAll('c');
+          for (const cell of cells) {
+            const colRef = cell.getAttribute('r') || '';
+            const colLetter = colRef.charCodeAt(0) - 65;
+            if (colLetter !== nameColIndex) continue;
+
+            let val = '';
+            const t  = cell.getAttribute('t');
+            if (t === 's') {
+              val = sharedStrings[parseInt(cell.querySelector('v')?.textContent || '0')] || '';
+            } else {
+              val = cell.querySelector('v')?.textContent || '';
+            }
+            val = val.trim();
+            // 2~4 个汉字
             if (val.length >= 2 && val.length <= 4 && /^[\u4e00-\u9fff]+$/.test(val)) {
               if (!studentNames.includes(val)) studentNames.push(val);
             }

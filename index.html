@@ -383,7 +383,7 @@
       <div id="guide-name" class="guide-box">
         <span class="guide-label">姓名</span>
       </div>
-      <div class="guide-hint">将实验报告对准虚线框</div>
+      <div class="guide-hint">将姓名对准绿框内</div>
     </div>
     <div class="btn-row">
       <button class="btn btn-secondary" id="btn-camera" onclick="toggleCamera()">打开摄像头</button>
@@ -537,7 +537,7 @@
       }
     }
 
-    // ===== 拍照并识别（快速单次 OCR）=====
+    // ===== 拍照并识别（直接识别方框内的文字）=====
     async function captureAndRecognize() {
       if (!worker) { setStatus('OCR 正在初始化，请稍候', 'loading'); return; }
       if (!cameraOn) { setStatus('请先打开摄像头', 'err'); return; }
@@ -552,7 +552,7 @@
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
 
-        // 截取姓名区域 + 灰度二值化（放大3倍）
+        // 截取姓名框区域 + 灰度二值化
         const fullW = canvas.width, fullH = canvas.height;
         const sx = Math.floor(fullW * 0.05), sy = Math.floor(fullH * 0.30);
         const sw = Math.floor(fullW * 0.45), sh = Math.floor(fullH * 0.45);
@@ -560,11 +560,12 @@
         setStatus('正在识别...', 'loading');
         const result = await worker.recognize(dataUrl);
         const text  = result.data.text.trim();
-        const words = result.data.words || [];
 
+        // 直接拿识别出的文字（去噪：只保留汉字和空格）
+        const rawName = text.replace(/[^\u4e00-\u9fff\u3000\s]/g, '').trim().replace(/\s+/g, '');
         setStatus('正在匹配名单...', 'loading');
-        const matchedName = findBestMatch(words, text);
-        displayResult(matchedName);
+        const matchedName = findBestMatch(rawName);
+        displayResult(matchedName, rawName);
 
       } catch (e) {
         setStatus('识别失败：' + e.message, 'err');
@@ -592,63 +593,30 @@
       return c.toDataURL('image/png');
     }
 
-    // ===== 核心匹配：容忍 OCR 错字，用字符级匹配 =====
-    function findBestMatch(words, fullText) {
+    // ===== 核心匹配：方框内直接识别姓名，精确或编辑距离匹配 =====
+    function findBestMatch(rawText) {
       if (studentNames.length === 0) return null;
 
-      // 提取图中所有汉字（即使 OCR 输出混乱也尽量还原）
-      const allChars = [...new Set([...fullText].filter(c => /[\u4e00-\u9fff]/.test(c)))];
+      // 精确匹配：直接包含在名单中
+      const exact = studentNames.find(n => rawText.includes(n));
+      if (exact) return exact;
 
-      // 提取高置信度的 2~4 字汉字词（优先用）
-      const highConfWords = words
-        .filter(w => w.text && /[\u4e00-\u9fff]{2,4}/.test(w.text) && (w.confidence || 0) >= 55)
-        .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
-
-      const candidates = [];
-
+      // 编辑距离 <= 1 匹配
+      let best = null, bestScore = Infinity;
       for (const cn of studentNames) {
-        // 策略A：高置信度词精确包含名单
-        for (const w of highConfWords) {
-          if (w.text.includes(cn)) {
-            candidates.push({ name: cn, score: 100 });
-            break;
-          }
-        }
-        if (candidates.find(c => c.name === cn)) continue;
-
-        // 策略B：编辑距离 <= 1（在候选词中）
-        for (const w of highConfWords) {
-          if (Math.abs(cn.length - w.text.length) <= 1 && levenshtein(cn, w.text) <= 1) {
-            candidates.push({ name: cn, score: 90 });
-            break;
-          }
-        }
-        if (candidates.find(c => c.name === cn)) continue;
-
-        // 策略C：字符级匹配容忍错字
-        // 统计名单中有多少个字在 allChars 中
-        let matchCount = 0;
-        for (const ch of cn) {
-          if (allChars.includes(ch)) matchCount++;
-        }
-        const ratio = matchCount / cn.length;
-        if (ratio >= 0.8) { // 至少 80% 的字对上了
-          candidates.push({ name: cn, score: Math.round(ratio * 100) });
+        const dist = levenshtein(rawText, cn);
+        if (dist <= 1 && dist < bestScore) {
+          bestScore = dist;
+          best = cn;
         }
       }
-
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => b.score - a.score);
-        return candidates[0].name;
-      }
-
-      return null;
+      return best;
     }
 
     // ===== 显示结果 =====
     let pendingScore = 80; // 待录入成绩
 
-    function displayResult(matchedName) {
+    function displayResult(matchedName, rawOCR) {
       document.getElementById('result-card').style.display = 'block';
       pendingScore = 80;
 
@@ -663,11 +631,11 @@
         document.getElementById('btn-confirm').disabled = false;
         setStatus('识别完成，请核对后确认', 'ok');
       } else {
-        nameEl.textContent = '未识别到姓名';
+        nameEl.textContent = '未匹配（识别为：' + (rawOCR || '空') + '）';
         nameEl.className  = 'result-value empty';
         confName.style.width = '0%';
         document.getElementById('btn-confirm').disabled = true;
-        setStatus('未识别到姓名，请重新拍照', 'err');
+        setStatus('未匹配名单，请重新拍照', 'err');
       }
 
       scoreEl.textContent = '80';

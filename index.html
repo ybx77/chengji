@@ -612,30 +612,58 @@
         const sx = Math.floor(fullW * 0.05), sy = Math.floor(fullH * 0.30);
         const sw = Math.floor(fullW * 0.45), sh = Math.floor(fullH * 0.45);
 
-        // 目标：320×240（正好是 Tesseract 推荐的小图尺寸，大幅加速识别）
-        const TW = 320, TH = 240;
+        // ===== 快速二值化：Otsu 自动阈值 + Uint8Array 单通道 ====
+        function binarizeCanvas(srcCanvas) {
+          const w = srcCanvas.width, h = srcCanvas.height;
+          const out = document.createElement('canvas');
+          out.width = w; out.height = h;
+          const octx = out.getContext('2d');
+          octx.drawImage(srcCanvas, 0, 0);
 
-        // crop → resize → 灰度 → 转 Blob，全程 Canvas API，无 JS 像素循环
+          const imgData = octx.getImageData(0, 0, w, h);
+          const d = imgData.data;
+
+          // 转单通道灰度 Uint8Array
+          const gray = new Uint8Array(w * h);
+          for (let i = 0, p = 0; i < w * h; i++, p += 4) {
+            gray[i] = (d[p] * 299 + d[p + 1] * 587 + d[p + 2] * 114 + 500) / 1000 | 0;
+          }
+
+          // Otsu 自动阈值
+          let sum = 0, cnt = 0;
+          for (let v of gray) { sum += v; cnt++; }
+          const mean = sum / cnt;
+          let thresh = Math.round(mean);
+
+          // 简化迭代：1 次 pass 取阈值
+          let w0 = 0, s0 = 0, w1 = 0, s1 = 0;
+          for (let v of gray) {
+            if (v < thresh) { w0++; s0 += v; } else { w1++; s1 += v; }
+          }
+          const m0 = w0 ? s0 / w0 : 0;
+          const m1 = w1 ? s1 / w1 : 0;
+          thresh = Math.round((m0 + m1) / 2);
+
+          // 二值化写回 RGBA
+          for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+            const v = gray[i] < thresh ? 0 : 255;
+            d[p] = d[p + 1] = d[p + 2] = v;
+          }
+          octx.putImageData(imgData, 0, 0);
+          return out;
+        }
+
+        // 目标分辨率：640×480（足够清晰，OCR 效果好）
+        const TW = 640, TH = 480;
+
         const crop = document.createElement('canvas');
         crop.width = TW; crop.height = TH;
         const cctx = crop.getContext('2d');
         cctx.imageSmoothingEnabled = false;
         cctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, TW, TH);
 
-        // Canvas 灰度化（比逐像素 JS 快数十倍）
-        const gray = document.createElement('canvas');
-        gray.width = TW; gray.height = TH;
-        const gctx = gray.getContext('2d');
-        gctx.drawImage(crop, 0, 0);
-        const imgData = gctx.getImageData(0, 0, TW, TH);
-        const d = imgData.data;
-        for (let i = 0; i < d.length; i += 4) {
-          d[i] = d[i+1] = d[i+2] = (d[i] * 299 + d[i+1] * 587 + d[i+2] * 114 + 500) / 1000;
-        }
-        gctx.putImageData(imgData, 0, 0);
-
-        // Tesseract 接受 canvas、data URL 或 ImageData
-        const result = await worker.recognize(gray);
+        const binary = binarizeCanvas(crop);
+        const result = await worker.recognize(binary);
         const text = result.data.text.trim().replace(/[^\u4e00-\u9fff]/g, '');
         const cands = text ? rankCandidates(text) : [];
 

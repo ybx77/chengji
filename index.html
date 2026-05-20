@@ -572,19 +572,19 @@
       }
     }
 
-    // ===== OCR Worker 初始化（只加载中文，快速度）=====
+    // ===== OCR Worker 初始化 =====
     async function initOCRWorker() {
       if (worker) return;
       setStatus('正在加载 OCR 模型（首次约需30秒）...', 'loading');
       try {
         worker = await Tesseract.createWorker('chi_sim', 1, {
+          cacheMethod: 'indexedDB',
           logger: m => {
             if (m.status === 'recognizing text') {
               setStatus(`识别中 ${Math.round(m.progress * 100)}%`, 'loading');
             }
           }
         });
-        await worker.setParameters({});
         setStatus('OCR 就绪，请拍照识别', 'ok');
       } catch (e) {
         setStatus('OCR 加载失败：' + e.message, 'err');
@@ -593,7 +593,7 @@
 
     // ===== 拍照并识别 =====
     async function captureAndRecognize() {
-      if (isRecognizing) return;                          // 防重入
+      if (isRecognizing) return;
       if (!worker) { setStatus('OCR 正在初始化，请稍候', 'loading'); return; }
       if (!cameraOn) { setStatus('请先打开摄像头', 'err'); return; }
 
@@ -612,28 +612,34 @@
         const sx = Math.floor(fullW * 0.05), sy = Math.floor(fullH * 0.30);
         const sw = Math.floor(fullW * 0.45), sh = Math.floor(fullH * 0.45);
 
-        // 先用 scale=4 识别（更高清）；若已找到姓名候选则跳过第二次
-        const scales = [4, 2];
-        let allCandidates = [];
+        // 目标：320×240（正好是 Tesseract 推荐的小图尺寸，大幅加速识别）
+        const TW = 320, TH = 240;
 
-        for (let i = 0; i < scales.length; i++) {
-          const scale = scales[i];
-          const dataUrl = cropAndPreprocess(sx, sy, sw, sh, scale);
-          const result = await worker.recognize(dataUrl);
-          const text = result.data.text.trim().replace(/[^\u4e00-\u9fff]/g, '');
-          if (text) {
-            const cands = rankCandidates(text);
-            if (cands.length > 0) {
-              allCandidates = cands;
-              // 最高分候选 ≥85 分时认为足够准确，跳过后续 scale
-              if (cands[0].score >= 85 && i < scales.length - 1) break;
-            } else if (allCandidates.length === 0) {
-              allCandidates = cands;
-            }
-          }
+        // crop → resize → 灰度 → 转 Blob，全程 Canvas API，无 JS 像素循环
+        const crop = document.createElement('canvas');
+        crop.width = TW; crop.height = TH;
+        const cctx = crop.getContext('2d');
+        cctx.imageSmoothingEnabled = false;
+        cctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, TW, TH);
+
+        // Canvas 灰度化（比逐像素 JS 快数十倍）
+        const gray = document.createElement('canvas');
+        gray.width = TW; gray.height = TH;
+        const gctx = gray.getContext('2d');
+        gctx.drawImage(crop, 0, 0);
+        const imgData = gctx.getImageData(0, 0, TW, TH);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = d[i+1] = d[i+2] = (d[i] * 299 + d[i+1] * 587 + d[i+2] * 114 + 500) / 1000;
         }
+        gctx.putImageData(imgData, 0, 0);
 
-        displayCandidates(allCandidates);
+        // Tesseract 接受 canvas、data URL 或 ImageData
+        const result = await worker.recognize(gray);
+        const text = result.data.text.trim().replace(/[^\u4e00-\u9fff]/g, '');
+        const cands = text ? rankCandidates(text) : [];
+
+        displayCandidates(cands);
 
       } catch (e) {
         setStatus('识别失败：' + e.message, 'err');
@@ -644,31 +650,6 @@
       }
     }
 
-    // ===== 图像预处理（二值化 + 自适应阈值）=====
-    function cropAndPreprocess(sx, sy, sw, sh, scale) {
-      const c = document.createElement('canvas');
-      c.width  = sw * scale;
-      c.height = sh * scale;
-      const g = c.getContext('2d');
-      g.drawImage(canvas, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      const imgData = g.getImageData(0, 0, c.width, c.height);
-      const d = imgData.data;
-
-      // 计算平均亮度用于自适应阈值
-      let sum = 0;
-      for (let i = 0; i < d.length; i += 4) sum += d[i];
-      const avg = sum / (d.length / 4);
-
-      // 自适应阈值：稍微偏向深色文字
-      const thresh = Math.max(100, Math.min(200, avg * 1.1));
-      for (let i = 0; i < d.length; i += 4) {
-        const gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
-        const val = gray > thresh ? 255 : 0;
-        d[i] = d[i+1] = d[i+2] = val;
-      }
-      g.putImageData(imgData, 0, 0);
-      return c.toDataURL('image/png');
-    }
 
     // ===== 对所有名单打分并排序 =====
     function rankCandidates(text) {

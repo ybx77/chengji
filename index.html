@@ -366,6 +366,61 @@
       background: linear-gradient(90deg, #5b8dee, #7c6df0);
       transition: width 0.3s;
     }
+    /* ---- 识别结果候选名 ---- */
+    .candidates-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .candidate-btn {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid #2a2a45;
+      background: #12122a;
+      color: #a8b4fc;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+    }
+
+    .candidate-btn:hover { background: #1e1e3a; border-color: #5b8dee; }
+
+    .candidate-btn.selected {
+      background: linear-gradient(135deg, #5b8dee, #7c6df0);
+      border-color: transparent;
+      color: #fff;
+    }
+
+    .candidate-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 20px;
+      background: rgba(255,255,255,0.15);
+      color: inherit;
+      min-width: 36px;
+      text-align: center;
+    }
+
+    .candidate-btn.selected .candidate-badge { background: rgba(255,255,255,0.25); }
+
+    .no-candidates {
+      text-align: center;
+      color: #4a4a7a;
+      font-size: 13px;
+      padding: 12px;
+      background: #12122a;
+      border-radius: 10px;
+      border: 1px dashed #2a2a45;
+      margin-bottom: 12px;
+    }
   </style>
 </head>
 <body>
@@ -397,20 +452,16 @@
     <!-- 识别结果 -->
   <div class="card" id="result-card" style="display:none">
     <div class="card-title">识别结果</div>
-    <div class="result-row">
-      <div class="result-box">
-        <div class="result-label">姓名</div>
-        <div class="result-value empty" id="result-name">—</div>
-        <div class="confidence-bar"><div class="confidence-fill" id="conf-name" style="width:0%"></div></div>
-      </div>
-      <div class="result-box">
-        <div class="result-label">成绩</div>
-        <div style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:2px">
-          <button class="btn btn-secondary" style="padding:6px 12px;font-size:18px;flex:none" onclick="adjustScore(-5)">−</button>
-          <div class="result-value" id="result-score" style="min-width:44px;text-align:center">80</div>
-          <button class="btn btn-secondary" style="padding:6px 12px;font-size:18px;flex:none" onclick="adjustScore(5)">+</button>
-        </div>
-        <div class="confidence-bar"><div class="confidence-fill" id="conf-score" style="width:100%"></div></div>
+    <!-- 候选姓名区域（动态生成） -->
+    <div id="candidates-wrap" class="candidates-wrap"></div>
+    <div id="no-candidates" class="no-candidates" style="display:none">未识别到文字，请保持适当距离重拍</div>
+    <!-- 成绩 -->
+    <div class="result-box" style="margin-bottom:12px">
+      <div class="result-label">成绩</div>
+      <div style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:2px">
+        <button class="btn btn-secondary" style="padding:6px 12px;font-size:18px;flex:none" onclick="adjustScore(-5)">−</button>
+        <div class="result-value" id="result-score" style="min-width:44px;text-align:center">80</div>
+        <button class="btn btn-secondary" style="padding:6px 12px;font-size:18px;flex:none" onclick="adjustScore(5)">+</button>
       </div>
     </div>
     <div class="btn-row">
@@ -473,6 +524,7 @@
     let cameraOn = false;
     let studentNames = [];         // 姓名列表
     let worker = null;
+    let _lastCandidates = [];     // 上一次的候选列表
 
     // 原始 Excel 数据（用于导出时写入）
     let originalExcelBuffer = null; // ArrayBuffer
@@ -503,7 +555,7 @@
           cameraOn = true;
           btn.textContent = '关闭摄像头';
           document.getElementById('btn-capture').disabled = false;
-          setStatus('摄像头已打开，请将实验报告对准框线', 'ok');
+          setStatus('摄像头已打开，姓名框只放姓名文字，保持适当距离', 'ok');
           initOCRWorker();
         } catch (e) {
           setStatus('摄像头权限被拒绝：' + e.message, 'err');
@@ -519,25 +571,26 @@
       }
     }
 
-    // ===== OCR Worker 初始化（精简，专注速度）=====
+    // ===== OCR Worker 初始化（只加载中文，快速度）=====
     async function initOCRWorker() {
       if (worker) return;
       setStatus('正在加载 OCR 模型（首次约需30秒）...', 'loading');
       try {
-        worker = await Tesseract.createWorker('chi_sim+eng', 1, {
+        worker = await Tesseract.createWorker('chi_sim', 1, {
           logger: m => {
             if (m.status === 'recognizing text') {
-              setStatus(`识别中... ${Math.round(m.progress * 100)}%`, 'loading');
+              setStatus(`识别中 ${Math.round(m.progress * 100)}%`, 'loading');
             }
           }
         });
+        await worker.setParameters({});
         setStatus('OCR 就绪，请拍照识别', 'ok');
       } catch (e) {
         setStatus('OCR 加载失败：' + e.message, 'err');
       }
     }
 
-    // ===== 拍照并识别（直接识别方框内的文字）=====
+    // ===== 拍照并识别 =====
     async function captureAndRecognize() {
       if (!worker) { setStatus('OCR 正在初始化，请稍候', 'loading'); return; }
       if (!cameraOn) { setStatus('请先打开摄像头', 'err'); return; }
@@ -552,20 +605,25 @@
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
 
-        // 截取姓名框区域 + 灰度二值化
         const fullW = canvas.width, fullH = canvas.height;
         const sx = Math.floor(fullW * 0.05), sy = Math.floor(fullH * 0.30);
         const sw = Math.floor(fullW * 0.45), sh = Math.floor(fullH * 0.45);
-        const dataUrl = cropAndPreprocess(sx, sy, sw, sh, 3);
-        setStatus('正在识别...', 'loading');
-        const result = await worker.recognize(dataUrl);
-        const text  = result.data.text.trim();
 
-        // 直接拿识别出的文字（去噪：只保留汉字和空格）
-        const rawName = text.replace(/[^\u4e00-\u9fff\u3000\s]/g, '').trim().replace(/\s+/g, '');
-        setStatus('正在匹配名单...', 'loading');
-        const matchedName = findBestMatch(rawName);
-        displayResult(matchedName, rawName);
+        // 用两个尺度识别，选候选最丰富的那个
+        const scales = [2, 4];
+        let allCandidates = [];
+
+        for (const scale of scales) {
+          const dataUrl = cropAndPreprocess(sx, sy, sw, sh, scale);
+          const result = await worker.recognize(dataUrl);
+          const text = result.data.text.trim().replace(/[^\u4e00-\u9fff]/g, '');
+          if (text) {
+            const cands = rankCandidates(text);
+            if (cands.length > allCandidates.length) allCandidates = cands;
+          }
+        }
+
+        displayCandidates(allCandidates);
 
       } catch (e) {
         setStatus('识别失败：' + e.message, 'err');
@@ -575,70 +633,114 @@
       }
     }
 
-    // ===== 截取姓名区域 + 图像预处理 =====
+    // ===== 图像预处理（二值化 + 自适应阈值）=====
     function cropAndPreprocess(sx, sy, sw, sh, scale) {
       const c = document.createElement('canvas');
       c.width  = sw * scale;
       c.height = sh * scale;
       const g = c.getContext('2d');
       g.drawImage(canvas, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      // 灰度 + 二值化（印刷体高对比度效果最好）
       const imgData = g.getImageData(0, 0, c.width, c.height);
       const d = imgData.data;
+
+      // 计算平均亮度用于自适应阈值
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += d[i];
+      const avg = sum / (d.length / 4);
+
+      // 自适应阈值：稍微偏向深色文字
+      const thresh = Math.max(100, Math.min(200, avg * 1.1));
       for (let i = 0; i < d.length; i += 4) {
         const gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
-        d[i] = d[i+1] = d[i+2] = gray > 128 ? 255 : 0;
+        const val = gray > thresh ? 255 : 0;
+        d[i] = d[i+1] = d[i+2] = val;
       }
       g.putImageData(imgData, 0, 0);
       return c.toDataURL('image/png');
     }
 
-    // ===== 核心匹配：方框内直接识别姓名，精确或编辑距离匹配 =====
-    function findBestMatch(rawText) {
-      if (studentNames.length === 0) return null;
+    // ===== 对所有名单打分并排序 =====
+    function rankCandidates(text) {
+      if (!text || studentNames.length === 0) return [];
 
-      // 精确匹配：直接包含在名单中
-      const exact = studentNames.find(n => rawText.includes(n));
-      if (exact) return exact;
+      const scored = studentNames.map(cn => {
+        let score = 0;
 
-      // 编辑距离 <= 1 匹配
-      let best = null, bestScore = Infinity;
-      for (const cn of studentNames) {
-        const dist = levenshtein(rawText, cn);
-        if (dist <= 1 && dist < bestScore) {
-          bestScore = dist;
-          best = cn;
+        // 精确包含 → 最高分
+        if (text.includes(cn)) {
+          score = 100 + cn.length * 5;
+        } else {
+          // 每个姓名字在 OCR 结果中出现的次数
+          let matched = 0;
+          for (const ch of cn) {
+            if (text.includes(ch)) matched++;
+          }
+          const ratio = matched / cn.length;
+          score = Math.round(ratio * 80);
+
+          // 前缀匹配加分
+          if (cn.startsWith(text)) score += 40;
+          else if (cn.startsWith(text.slice(0, 1))) score += 10;
+
+          // 编辑距离
+          const dist = levenshtein(cn, text);
+          if (dist === 0) score = 100;
+          else if (dist === 1) score = Math.max(score, 90);
+          else if (dist === 2) score = Math.max(score, 70);
         }
-      }
-      return best;
+
+        return { name: cn, score };
+      });
+
+      return scored
+        .filter(c => c.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5); // 最多5个候选
     }
 
-    // ===== 显示结果 =====
-    let pendingScore = 80; // 待录入成绩
+    // ===== 展示候选列表 =====
+    let selectedName = null; // 当前选中的姓名
 
-    function displayResult(matchedName, rawOCR) {
+    function displayCandidates(candidates) {
+      _lastCandidates = candidates;
       document.getElementById('result-card').style.display = 'block';
       pendingScore = 80;
 
-      const nameEl   = document.getElementById('result-name');
-      const scoreEl  = document.getElementById('result-score');
-      const confName = document.getElementById('conf-name');
-
-      if (matchedName) {
-        nameEl.textContent = matchedName;
-        nameEl.className  = 'result-value';
-        confName.style.width = '100%';
-        document.getElementById('btn-confirm').disabled = false;
-        setStatus('识别完成，请核对后确认', 'ok');
-      } else {
-        nameEl.textContent = '未匹配（识别为：' + (rawOCR || '空') + '）';
-        nameEl.className  = 'result-value empty';
-        confName.style.width = '0%';
-        document.getElementById('btn-confirm').disabled = true;
-        setStatus('未匹配名单，请重新拍照', 'err');
-      }
+      const wrap = document.getElementById('candidates-wrap');
+      const noCand = document.getElementById('no-candidates');
+      const scoreEl = document.getElementById('result-score');
+      const btnConfirm = document.getElementById('btn-confirm');
 
       scoreEl.textContent = '80';
+
+      if (candidates.length === 0) {
+        wrap.innerHTML = '';
+        noCand.style.display = 'block';
+        btnConfirm.disabled = true;
+        selectedName = null;
+        setStatus('未识别到文字，请保持适当距离重拍', 'err');
+        return;
+      }
+
+      noCand.style.display = 'none';
+
+      const top3 = candidates.slice(0, 3);
+      wrap.innerHTML = top3.map((c, i) => `
+        <button class="candidate-btn${i === 0 ? ' selected' : ''}" onclick="selectCandidate(${i})">
+          ${c.name}
+          <span class="candidate-badge">${c.score}%</span>
+        </button>
+      `).join('');
+
+      selectedName = top3[0].name;
+      btnConfirm.disabled = false;
+      setStatus(`识别完成，请选择姓名后确认`, 'ok');
+    }
+
+    function selectCandidate(index) {
+      const btns = document.querySelectorAll('.candidate-btn');
+      btns.forEach((b, i) => b.classList.toggle('selected', i === index));
+      selectedName = _lastCandidates[index]?.name || null;
     }
 
     // ===== 成绩增减（以5为单位）=====
@@ -787,10 +889,9 @@
     let enteredNames = new Set(); // 已录入的姓名
 
     function showConfirm() {
-      const name = document.getElementById('result-name').textContent;
-      if (!name || name === '未识别到姓名') { alert('请先识别姓名'); return; }
+      if (!selectedName) { alert('请先选择姓名'); return; }
       document.getElementById('modal').classList.add('show');
-      document.getElementById('modal-name').value = name;
+      document.getElementById('modal-name').value = selectedName;
       document.getElementById('modal-score-display').textContent = pendingScore;
     }
 
@@ -799,7 +900,7 @@
     }
 
     function confirmRecord() {
-      const name = document.getElementById('modal-name').textContent.trim();
+      const name = document.getElementById('modal-name').value.trim();
       if (!name) { alert('姓名不能为空'); return; }
 
       if (!originalExcelBuffer) {

@@ -403,7 +403,7 @@
     </div>
   </div>
 
-  <!-- 识别结果 -->
+    <!-- 识别结果 -->
   <div class="card" id="result-card" style="display:none">
     <div class="card-title">识别结果</div>
     <div class="result-row">
@@ -414,8 +414,12 @@
       </div>
       <div class="result-box">
         <div class="result-label">成绩</div>
-        <div class="result-value empty" id="result-score">—</div>
-        <div class="confidence-bar"><div class="confidence-fill" id="conf-score" style="width:0%"></div></div>
+        <div style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:2px">
+          <button class="btn btn-secondary" style="padding:6px 12px;font-size:18px;flex:none" onclick="adjustScore(-5)">−</button>
+          <div class="result-value" id="result-score" style="min-width:44px;text-align:center">80</div>
+          <button class="btn btn-secondary" style="padding:6px 12px;font-size:18px;flex:none" onclick="adjustScore(5)">+</button>
+        </div>
+        <div class="confidence-bar"><div class="confidence-fill" id="conf-score" style="width:100%"></div></div>
       </div>
     </div>
     <div class="btn-row">
@@ -459,7 +463,7 @@
       </div>
       <div class="modal-field">
         <label>成绩</label>
-        <input type="text" id="modal-score" class="score">
+        <div style="text-align:center;font-size:22px;font-weight:700;color:#ffcc66;padding:12px;background:#12122a;border:1px solid #2a2a45;border-radius:10px" id="modal-score-display">80</div>
       </div>
       <div class="btn-row">
         <button class="btn btn-secondary" onclick="closeModal()">取消</button>
@@ -476,18 +480,15 @@
     // ===== 全局状态 =====
     let stream = null;
     let cameraOn = false;
-    let studentNames = [];           // ['张三','李四',...]
-    let studentNamesLower = new Set();
+    let studentNames = [];
     let records = [];
-    let lastCapture = null;
+    let currentScore = 80;
 
-    // Tesseract worker（复用）
     let worker = null;
-    let initWorker = null;
 
-    const video = document.getElementById('video');
+    const video  = document.getElementById('video');
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+    const ctx    = canvas.getContext('2d');
 
     // ===== 状态提示 =====
     function setStatus(msg, type = '') {
@@ -525,7 +526,7 @@
       }
     }
 
-    // ===== OCR Worker 初始化（使用更优的 PSM 模式）=====
+    // ===== OCR Worker 初始化（精简，专注速度）=====
     async function initOCRWorker() {
       if (worker) return;
       setStatus('正在加载 OCR 模型（首次约需30秒）...', 'loading');
@@ -537,19 +538,13 @@
             }
           }
         });
-        await worker.setParameters({
-          // PSM 6: Assume a uniform block of text. 最适合表格类布局
-          tessedit_pageseg_mode: '6',
-          // 提高中文识别精度
-          preserve_interword_spaces: '1',
-        });
         setStatus('OCR 就绪，请拍照识别', 'ok');
       } catch (e) {
         setStatus('OCR 加载失败：' + e.message, 'err');
       }
     }
 
-    // ===== 拍照并识别（标签定位法）=====
+    // ===== 拍照并识别（快速单次 OCR）=====
     async function captureAndRecognize() {
       if (!worker) { setStatus('OCR 正在初始化，请稍候', 'loading'); return; }
       if (!cameraOn) { setStatus('请先打开摄像头', 'err'); return; }
@@ -560,21 +555,19 @@
       setStatus('正在拍摄...', 'loading');
 
       try {
-        canvas.width = video.videoWidth;
+        canvas.width  = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
 
-        // 对整张图做一次 OCR，获取每个词的位置
-        const fullDataUrl = canvas.toDataURL('image/jpeg', 0.95);
-        setStatus('正在识别文字位置...', 'loading');
-        const result = await worker.recognize(fullDataUrl);
-
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        setStatus('正在识别...', 'loading');
+        const result = await worker.recognize(dataUrl);
+        const text  = result.data.text;
         const words = result.data.words || [];
-        setStatus('正在定位姓名和成绩...', 'loading');
 
-        const { name, score, rawNameText, rawScoreText } = locateByLabels(words, result.data.text);
-
-        displayResult(name, score, rawNameText, rawScoreText);
+        setStatus('正在匹配名单...', 'loading');
+        const matchedName = findBestMatch(words, text);
+        displayResult(matchedName);
 
       } catch (e) {
         setStatus('识别失败：' + e.message, 'err');
@@ -584,332 +577,129 @@
       }
     }
 
-    // ===== 标签定位法：找"姓名"和"成绩"标签附近的值 =====
-    function locateByLabels(words, fullText) {
-      // 找"姓名"标签的词
-      const nameLabel = words.find(w =>
-        w.text === '姓名' ||
-        w.text === '姓名：' || w.text === '姓名:' ||
-        w.text === '姓名 ' || w.text === '姓名:' ||
-        w.text === '学生姓名' ||
-        (w.text.includes('姓名') && w.text.length <= 4)
-      );
-
-      // 找"成绩"标签的词
-      const scoreLabel = words.find(w =>
-        w.text === '成绩' ||
-        w.text === '成绩：' || w.text === '成绩:' ||
-        w.text === '成绩 ' || w.text === '成绩:' ||
-        w.text === '得分' ||
-        (w.text.includes('成绩') && w.text.length <= 4)
-      );
-
-      let rawNameText = '';
-      let rawScoreText = '';
-
-      // ===== 定位姓名值 =====
-      let detectedName = null;
-      if (nameLabel) {
-        // 在姓名标签右侧、同一行（y坐标接近）找最大汉字词
-        const labelTop = nameLabel.baseline.y1 - nameLabel.bbox.y1; // 估算字符高度
-        const rowTolerance = labelTop * 1.5;
-
-        // 找右侧同行的汉字词
-        const candidates = words.filter(w => {
-          if (!w.text) return false;
-          const isChinese = /[\u4e00-\u9fff]/.test(w.text);
-          if (!isChinese) return false;
-          if (w.text === '姓名' || w.text === '姓名:' || w.text === '姓名：') return false;
-          // y 坐标接近（同行）
-          const wCenter = (w.bbox.y0 + w.bbox.y1) / 2;
-          const lCenter = (nameLabel.bbox.y0 + nameLabel.bbox.y1) / 2;
-          return Math.abs(wCenter - lCenter) <= rowTolerance &&
-                 w.bbox.x0 > nameLabel.bbox.x1; // 在标签右侧
-        });
-
-        if (candidates.length > 0) {
-          // 选最右边那个（通常是填写的内容）
-          candidates.sort((a, b) => b.bbox.x0 - a.bbox.x0);
-          const best = candidates[0];
-          rawNameText = best.text;
-          // 与名单匹配
-          detectedName = matchNameFromCandidates(best.text);
-        }
-      }
-
-      // 如果标签法失败，回退到区域扫描法
-      if (!detectedName) {
-        const fallback = scanNameByRegion(words, fullText);
-        if (fallback) {
-          detectedName = fallback;
-          rawNameText = fallback;
-        }
-      }
-
-      // ===== 定位成绩值 =====
-      let detectedScore = null;
-      if (scoreLabel) {
-        const labelTop = scoreLabel.baseline.y1 - scoreLabel.bbox.y1;
-        const rowTolerance = labelTop * 1.5;
-
-        const candidates = words.filter(w => {
-          if (!w.text) return false;
-          // 找数字（0~100）
-          const numVal = parseInt(w.text);
-          if (isNaN(numVal) || numVal < 0 || numVal > 100) return false;
-          const wCenter = (w.bbox.y0 + w.bbox.y1) / 2;
-          const lCenter = (scoreLabel.bbox.y0 + scoreLabel.bbox.y1) / 2;
-          return Math.abs(wCenter - lCenter) <= rowTolerance &&
-                 w.bbox.x0 > scoreLabel.bbox.x1;
-        });
-
-        if (candidates.length > 0) {
-          candidates.sort((a, b) => b.bbox.x0 - a.bbox.x0);
-          detectedScore = candidates[0].text;
-          rawScoreText = detectedScore;
-        }
-      }
-
-      // 成绩标签法失败，扫描全图最大数字
-      if (!detectedScore) {
-        const nums = extractNumbers(fullText);
-        for (const n of nums) {
-          const v = parseInt(n);
-          if (v >= 0 && v <= 100) {
-            detectedScore = n;
-            rawScoreText = n;
-            break;
-          }
-        }
-      }
-
-      return { name: detectedName, score: detectedScore, rawNameText, rawScoreText };
-    }
-
-    // ===== 回退法：按名单在姓名区域扫描最匹配的词 =====
-    function scanNameByRegion(words, fullText) {
+    // ===== 核心匹配：利用词位置 + 名单交叉验证 =====
+    function findBestMatch(words, fullText) {
       if (studentNames.length === 0) return null;
 
-      // 取画面中间偏左的区域（20%~65%宽，20%~75%高）
-      // 找这个区域内的汉字词
-      const chineseWords = words
-        .filter(w => {
-          if (!w.text) return false;
-          if (!/[\u4e00-\u9fff]/.test(w.text)) return false;
-          if (w.text === '姓名' || w.text === '成绩' || w.text === '学号' ||
-              w.text === '实验' || w.text === '分数' || w.text === '总分') return false;
-          // 2~4个汉字
-          if (w.text.length < 2 || w.text.length > 4) return false;
-          return true;
-        })
-        .sort((a, b) => b.confidence - a.confidence); // 按置信度排序
+      // 策略1：标签定位法（找"姓名"右侧的词）
+      const nameLabel = words.find(w =>
+        w.text === '姓名' || w.text === '姓名：' || w.text === '姓名:' ||
+        w.text === '学生姓名' || (w.text.includes('姓名') && w.text.length <= 4)
+      );
 
-      // 先找高置信度的
-      const highConf = chineseWords.filter(w => (w.confidence || 0) >= 60);
-      if (highConf.length > 0) {
-        for (const w of highConf) {
-          const matched = matchNameFromCandidates(w.text);
+      if (nameLabel) {
+        const labelH = nameLabel.baseline.y1 - nameLabel.bbox.y1;
+        const tolerance = Math.max(labelH * 1.5, 10);
+
+        const candidates = words.filter(w => {
+          if (!w.text || !/[\u4e00-\u9fff]/.test(w.text)) return false;
+          if (['姓名', '姓名：', '姓名:', '学生姓名'].includes(w.text)) return false;
+          const wCenter = (w.bbox.y0 + w.bbox.y1) / 2;
+          const lCenter = (nameLabel.bbox.y0 + nameLabel.bbox.y1) / 2;
+          return Math.abs(wCenter - lCenter) <= tolerance && w.bbox.x0 > nameLabel.bbox.x1;
+        });
+
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => b.bbox.x0 - a.bbox.x0);
+          const best = candidates[0];
+          const matched = matchName(best.text);
           if (matched) return matched;
         }
       }
 
-      // 按置信度扫描
+      // 策略2：按置信度扫描所有汉字词
+      const chineseWords = words
+        .filter(w => {
+          if (!w.text) return false;
+          if (!/[\u4e00-\u9fff]/.test(w.text)) return false;
+          if (['姓名', '成绩', '学号', '实验', '分数', '总分'].includes(w.text)) return false;
+          return w.text.length >= 2 && w.text.length <= 4;
+        })
+        .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
       for (const w of chineseWords) {
-        const matched = matchNameFromCandidates(w.text);
+        const matched = matchName(w.text);
         if (matched) return matched;
       }
 
+      // 策略3：名单中一定有 → 用编辑距离最接近的
+      const allChinese = [...new Set([...fullText].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('');
+      if (allChinese.length >= 2) {
+        let best = null, bestDist = 99;
+        for (const cn of studentNames) {
+          const dist = levenshtein(cn, allChinese);
+          if (dist < bestDist) { bestDist = dist; best = cn; }
+        }
+        if (best && bestDist <= 2) return best;
+      }
+
       return null;
     }
 
-    // ===== 名字匹配（结合名单）=====
-    function matchNameFromCandidates(ocrText) {
+    // ===== 名字与名单匹配（返回名单中的名字或 null）=====
+    function matchName(ocrText) {
       if (!ocrText || studentNames.length === 0) return null;
-
       const text = ocrText.trim();
-      const allChinese = [...new Set([...text].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('');
-      const words2to4 = text.match(/[\u4e00-\u9fff]{2,4}/g) || [];
-
-      const candidates = [];
 
       for (const cn of studentNames) {
-        // 策略1：名单中的名字完整包含于 OCR 结果
-        if (text.includes(cn)) {
-          candidates.push({ name: cn, score: 100 });
-          continue;
-        }
-        // 策略2：OCR 结果包含于名单
-        if (cn.includes(text) && text.length >= 2) {
-          candidates.push({ name: cn, score: 95 });
-          continue;
-        }
-        // 策略3：编辑距离 <= 1
-        for (const word of words2to4) {
-          if (Math.abs(cn.length - word.length) <= 1) {
-            const dist = levenshtein(cn, word);
-            if (dist <= 1) {
-              candidates.push({ name: cn, score: 90 - dist * 10 });
-              break;
-            }
-          }
-        }
-        // 策略4：≥2个相同汉字
-        if (!candidates.find(c => c.name === cn)) {
-          let matchCount = 0;
-          for (const char of cn) {
-            if (allChinese.includes(char)) matchCount++;
-          }
-          if (matchCount >= 2) {
-            candidates.push({ name: cn, score: 50 + matchCount * 10 });
-          }
+        // 精确包含
+        if (text.includes(cn) || cn.includes(text)) return cn;
+      }
+
+      // 编辑距离 <= 1
+      for (const cn of studentNames) {
+        if (Math.abs(cn.length - text.length) <= 1 && levenshtein(cn, text) <= 1) {
+          return cn;
         }
       }
 
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => b.score - a.score);
-        return candidates[0];
+      // ≥2个相同汉字
+      for (const cn of studentNames) {
+        let match = 0;
+        for (const char of cn) {
+          if (text.includes(char)) match++;
+        }
+        if (match >= 2) return cn;
       }
 
       return null;
     }
 
-    // ===== 分析 OCR 结果（姓名和成绩分开分析）=====
-    function analyzeOCR(nameText, scoreText) {
-      const nameCandidates = [];
-
-      // 姓名匹配策略（从姓名区域文字中找）
-      // 先提取姓名区域中所有连续的汉字词（2~4字），作为候选
-      const chineseWords = extractChineseWords(nameText);
-      // 也提取原始汉字串（去除空格、标点、数字）
-      const allChinese = extractChineseRaw(nameText);
-
-      // 策略1：名单精确包含于检测文字，或检测文字包含于名单
-      for (const cn of studentNames) {
-        if (allChinese.includes(cn)) {
-          nameCandidates.push({ name: cn, score: 100 });
-          continue;
-        }
-        if (cn.includes(allChinese) && allChinese.length >= 2) {
-          nameCandidates.push({ name: cn, score: 95 });
-          continue;
-        }
-      }
-
-      // 策略2：编辑距离（允许1个字符误差）
-      if (nameCandidates.length === 0) {
-        for (const cn of studentNames) {
-          for (const word of chineseWords) {
-            if (Math.abs(cn.length - word.length) <= 1) {
-              const dist = levenshtein(cn, word);
-              if (dist <= 1) {
-                nameCandidates.push({ name: cn, score: 90 - dist * 10 });
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      // 策略3：2个以上相同汉字
-      if (nameCandidates.length === 0) {
-        for (const cn of studentNames) {
-          let matchCount = 0;
-          for (const char of cn) {
-            if (allChinese.includes(char)) matchCount++;
-          }
-          if (matchCount >= 2) {
-            nameCandidates.push({ name: cn, score: 50 + matchCount * 10 });
-          }
-        }
-      }
-
-      // 策略4：名单中的某个字出现在检测文字中（兜底）
-      if (nameCandidates.length === 0) {
-        for (const cn of studentNames) {
-          for (const char of cn) {
-            if (allChinese.includes(char)) {
-              nameCandidates.push({ name: cn, score: 30 });
-              break;
-            }
-          }
-        }
-      }
-
-      nameCandidates.sort((a, b) => b.score - a.score);
-      const bestName = nameCandidates[0] || null;
-
-      // 成绩：优先从成绩区域取，0~100 的数字
-      let bestScore = null;
-      const scoreNums = extractNumbers(scoreText);
-      for (const n of scoreNums) {
-        const v = parseInt(n);
-        if (v >= 0 && v <= 100) { bestScore = n; break; }
-      }
-      // 成绩区域没找到也从姓名区域兜底（但降低优先级）
-      if (!bestScore) {
-        const allNums = extractNumbers(nameText);
-        for (const n of allNums) {
-          const v = parseInt(n);
-          if (v >= 0 && v <= 100) { bestScore = n; break; }
-        }
-      }
-
-      return { name: bestName, score: bestScore, rawNameText: nameText, rawScoreText: scoreText };
-    }
-
-    function displayResult(detectedName, detectedScore, rawNameText, rawScoreText) {
-      const name = detectedName;
-      const score = detectedScore;
+    // ===== 显示结果 =====
+    function displayResult(matchedName) {
       document.getElementById('result-card').style.display = 'block';
+      currentScore = 80;
 
-      const nameEl = document.getElementById('result-name');
-      const scoreEl = document.getElementById('result-score');
+      const nameEl   = document.getElementById('result-name');
+      const scoreEl  = document.getElementById('result-score');
       const confName = document.getElementById('conf-name');
       const confScore = document.getElementById('conf-score');
 
-      if (name) {
-        nameEl.textContent = typeof name === 'string' ? name : name.name;
-        const nameScore = typeof name === 'string' ? 100 : (name.score || 0);
-        nameEl.className = 'result-value';
-        confName.style.width = nameScore + '%';
+      if (matchedName) {
+        nameEl.textContent = matchedName;
+        nameEl.className  = 'result-value';
+        confName.style.width = '100%';
       } else {
-        const rawDisplay = rawNameText ? [...new Set([...rawNameText].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('') : '';
-        nameEl.textContent = rawDisplay.length >= 2 ? rawDisplay : '未识别到姓名';
-        nameEl.className = rawDisplay.length >= 2 ? 'result-value' : 'result-value empty';
+        nameEl.textContent = '未识别到姓名';
+        nameEl.className  = 'result-value empty';
         confName.style.width = '0%';
       }
 
-      if (score) {
-        scoreEl.textContent = score;
-        scoreEl.className = 'result-value';
-        confScore.style.width = '90%';
-      } else {
-        scoreEl.textContent = '未识别到成绩';
-        scoreEl.className = 'result-value empty';
-        confScore.style.width = '0%';
-      }
+      scoreEl.textContent  = '80';
+      scoreEl.className    = 'result-value';
+      confScore.style.width = '100%';
 
-      const nameOk = name !== null && name !== undefined;
-      document.getElementById('btn-confirm').disabled = !nameOk;
-      setStatus(nameOk ? '识别完成，请核对后确认' : '未识别到姓名，请重新拍照', nameOk ? 'ok' : 'err');
+      document.getElementById('btn-confirm').disabled = !matchedName;
+      setStatus(matchedName ? '识别完成，请核对后确认' : '未识别到姓名，请重新拍照', matchedName ? 'ok' : 'err');
+    }
+
+    // ===== 成绩增减（以5为单位）=====
+    function adjustScore(delta) {
+      currentScore = Math.max(0, Math.min(100, currentScore + delta));
+      document.getElementById('result-score').textContent = currentScore;
     }
 
     // ===== 辅助函数 =====
-        }
-      }
-      return words;
-    }
-
-    // 提取所有汉字（去重）
-    function extractChineseRaw(text) {
-      return [...new Set([...text].filter(c => /[\u4e00-\u9fff]/.test(c)))].join('');
-    }
-
-    function extractNumbers(text) {
-      const matches = text.match(/\b\d{1,3}\b/g) || [];
-      return [...new Set(matches)];
-    }
-
     function levenshtein(a, b) {
       const m = a.length, n = b.length;
       if (m === 0) return n; if (n === 0) return m;
@@ -931,49 +721,40 @@
       if (!file) return;
       document.getElementById('excel-info').textContent = '加载中...';
 
-      const buf = await file.arrayBuffer();
-      const zip = await JSZip.loadAsync(buf);
-      const sheetFiles = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
+      const buf  = await file.arrayBuffer();
+      const zip  = await JSZip.loadAsync(buf);
+      const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
 
       studentNames = [];
-      studentNamesLower.clear();
 
-      for (const sheetFile of sheetFiles) {
-        const xml = await zip.file(sheetFile).async('string');
+      for (const sheetFile of sheets) {
+        const xml   = await zip.file(sheetFile).async('string');
         const parser = new DOMParser();
-        const doc = parser.parseFromString(xml, 'text/xml');
+        const doc   = parser.parseFromString(xml, 'text/xml');
 
-        // 读取字符串表
         const sharedStrings = [];
         const ssFile = zip.file('xl/sharedStrings.xml');
         if (ssFile) {
-          const ssXml = await ssFile.async('string');
-          const ssDoc = parser.parseFromString(ssXml, 'text/xml');
+          const ssXml  = await ssFile.async('string');
+          const ssDoc  = parser.parseFromString(ssXml, 'text/xml');
           ssDoc.querySelectorAll('si t').forEach(t => {
             sharedStrings.push(t.textContent.trim());
           });
         }
 
-        // 遍历所有行，找姓名列
         const rows = doc.querySelectorAll('row');
         for (const row of rows) {
-          const cells = row.querySelectorAll('c');
-          for (const cell of cells) {
+          for (const cell of row.querySelectorAll('c')) {
             let val = '';
-            const t = cell.getAttribute('t');
+            const t  = cell.getAttribute('t');
             if (t === 's') {
-              const idx = parseInt(cell.querySelector('v')?.textContent || '0');
-              val = sharedStrings[idx] || '';
+              val = sharedStrings[parseInt(cell.querySelector('v')?.textContent || '0')] || '';
             } else {
               val = cell.querySelector('v')?.textContent || '';
             }
-
             val = val.trim();
             if (val.length >= 2 && val.length <= 4 && /^[\u4e00-\u9fff]+$/.test(val)) {
-              if (!studentNamesLower.has(val.toLowerCase())) {
-                studentNames.push(val);
-                studentNamesLower.add(val.toLowerCase());
-              }
+              if (!studentNames.includes(val)) studentNames.push(val);
             }
           }
         }
@@ -999,8 +780,8 @@
     // ===== 确认录入 =====
     function showConfirm() {
       document.getElementById('modal').classList.add('show');
-      document.getElementById('modal-name').value = document.getElementById('result-name').textContent;
-      document.getElementById('modal-score').value = document.getElementById('result-score').textContent;
+      document.getElementById('modal-name').value  = document.getElementById('result-name').textContent;
+      document.getElementById('modal-score-display').textContent = currentScore;
     }
 
     function closeModal() {
@@ -1008,10 +789,9 @@
     }
 
     function confirmRecord() {
-      const name = document.getElementById('modal-name').value.trim();
-      const score = document.getElementById('modal-score').value.trim();
-      if (!name) { alert('请填写姓名'); return; }
-      if (!score) { alert('请填写成绩'); return; }
+      const name  = document.getElementById('modal-name').value.trim();
+      const score = currentScore;
+      if (!name)  { alert('请填写姓名'); return; }
 
       records.push({ name, score, time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) });
       closeModal();
@@ -1046,20 +826,16 @@
     // ===== 导出 Excel =====
     function exportExcel() {
       if (records.length === 0) { alert('没有可导出的记录'); return; }
-
-      // 生成 CSV（Excel 可直接打开）
       let csv = '\uFEFF姓名,成绩,录入时间\n';
       for (const r of records) {
         csv += `${r.name},${r.score},${r.time}\n`;
       }
-
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
+      const a    = document.createElement('a');
+      a.href     = URL.createObjectURL(blob);
       a.download = `成绩录入_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.csv`;
       a.click();
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(a.href);
       setStatus(`已导出 ${records.length} 条记录`, 'ok');
     }
   </script>

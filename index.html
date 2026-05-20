@@ -830,9 +830,7 @@
       originalExcelBuffer = buf.slice(0); // 克隆保存
 
       const zip  = await JSZip.loadAsync(buf);
-      const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
-      console.log('[loadExcel] ZIP 内所有 XML 文件:', Object.keys(zip.files));
-      console.log('[loadExcel] 被识别为 sheet 的文件:', sheets);
+      const sheets = Object.keys(zip.files).filter(k => k.startsWith('xl/worksheets/sheet') && k.endsWith('.xml'));
 
       studentNames = [];
       studentRows  = [];
@@ -856,11 +854,7 @@
         }
 
         const allRows = doc.getElementsByTagName('row');
-        console.log(`[loadExcel] sheet=${sheetFile}, 行数=${allRows.length}`);
-        if (allRows.length === 0) {
-          console.log('[loadExcel] 未找到 row，打印 XML 前500:', xml.slice(0, 500));
-          continue;
-        }
+        if (allRows.length === 0) continue;
 
         let nameColIdx = -1, scoreColIdx = -1;
         excelHeaders = []; // 重置表头
@@ -1137,11 +1131,9 @@
 
         // getElementsByTagName 不受 XML 命名空间影响
         const allRows = doc.getElementsByTagName('row');
-        console.log('Worksheet 总行数:', allRows.length);
-        if (allRows.length > 0) {
-          console.log('第1行 getAttribute("r"):', allRows[0].getAttribute('r'));
-          console.log('第1行 attributes["r"]:', allRows[0].attributes['r'] ? allRows[0].attributes['r'].value : 'undefined');
-          console.log('第1行 outerHTML:', allRows[0].outerHTML.slice(0, 300));
+        if (allRows.length === 0) {
+          alert('工作表解析失败，未找到行数据');
+          return;
         }
 
         for (const row of toWrite) {
@@ -1156,8 +1148,10 @@
               break;
             }
           }
-          console.log(`写入 ${row.name} → Excel行${excelRow}，找到行节点:`, !!targetRow);
-          if (!targetRow) continue;
+          if (!targetRow) {
+            console.warn(`未找到行节点: ${row.name} → Excel行${excelRow}，跳过`);
+            continue;
+          }
 
           const cellRef = `${colLetter}${excelRow}`;
           const ssi = scoreIdxMap.get(row.name);

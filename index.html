@@ -678,7 +678,7 @@
       setStatus('请重新拍照识别', '');
     }
 
-    // ===== Excel 导入（只读取姓名列）=====
+    // ===== Excel 导入 =====
     async function loadExcel(file) {
       if (!file) return;
       document.getElementById('excel-info').textContent = '加载中...';
@@ -688,6 +688,8 @@
       const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
 
       studentNames = [];
+
+      const skipWords = new Set(['姓名', '成绩', '学号', '分数', '总分', '实验', '班级', '专业', '学院', '学校', '座号', '序号', '编号', '分', '报告', '标题', '课程']);
 
       for (const sheetFile of sheets) {
         const xml   = await zip.file(sheetFile).async('string');
@@ -704,12 +706,9 @@
           });
         }
 
-        // 找姓名列的列索引（扫描第一行）
-        const firstRow = doc.querySelector('row');
-        let nameColIndex = -1;
-        if (firstRow) {
-          const cells = firstRow.querySelectorAll('c');
-          for (const cell of cells) {
+        const rows = doc.querySelectorAll('row');
+        for (const row of rows) {
+          for (const cell of row.querySelectorAll('c')) {
             let val = '';
             const t  = cell.getAttribute('t');
             if (t === 's') {
@@ -718,41 +717,7 @@
               val = cell.querySelector('v')?.textContent || '';
             }
             val = val.trim();
-            // 表头包含"姓名"关键词
-            if (val.includes('姓名')) {
-              const colRef = cell.getAttribute('r') || '';
-              nameColIndex = colRef ? colRef.charCodeAt(0) - 65 : -1; // 简单处理 A=0, B=1...
-              break;
-            }
-          }
-        }
-
-        // 如果没找到，返回提示
-        if (nameColIndex < 0) {
-          document.getElementById('excel-info').textContent = '未找到姓名列';
-          setStatus('Excel 中未找到"姓名"列，请确认表头包含"姓名"', 'err');
-          return;
-        }
-
-        // 只读姓名列的数据（跳过第一行表头）
-        const allRows = doc.querySelectorAll('row');
-        for (let i = 1; i < allRows.length; i++) {
-          const cells = allRows[i].querySelectorAll('c');
-          for (const cell of cells) {
-            const colRef = cell.getAttribute('r') || '';
-            const colLetter = colRef.charCodeAt(0) - 65;
-            if (colLetter !== nameColIndex) continue;
-
-            let val = '';
-            const t  = cell.getAttribute('t');
-            if (t === 's') {
-              val = sharedStrings[parseInt(cell.querySelector('v')?.textContent || '0')] || '';
-            } else {
-              val = cell.querySelector('v')?.textContent || '';
-            }
-            val = val.trim();
-            // 2~4 个汉字
-            if (val.length >= 2 && val.length <= 4 && /^[\u4e00-\u9fff]+$/.test(val)) {
+            if (val.length >= 2 && val.length <= 4 && /^[\u4e00-\u9fff]+$/.test(val) && !skipWords.has(val)) {
               if (!studentNames.includes(val)) studentNames.push(val);
             }
           }

@@ -421,6 +421,17 @@
       border: 1px dashed #2a2a45;
       margin-bottom: 12px;
     }
+
+    /* ---- OCR 预览图 ---- */
+    #preview-img {
+      display: block;
+      width: 100%;
+      max-width: 280px;
+      margin: 0 auto 10px;
+      border-radius: 8px;
+      border: 1px solid #2a2a45;
+      background: #000;
+    }
   </style>
 </head>
 <body>
@@ -452,6 +463,7 @@
     <!-- 识别结果 -->
   <div class="card" id="result-card" style="display:none">
     <div class="card-title">识别结果</div>
+    <img id="preview-img" alt="预处理后的图片">
     <!-- 候选姓名区域（动态生成） -->
     <div id="candidates-wrap" class="candidates-wrap"></div>
     <div id="no-candidates" class="no-candidates" style="display:none">未识别到文字，请保持适当距离重拍</div>
@@ -526,6 +538,7 @@
     let worker = null;
     let _lastCandidates = [];     // 上一次的候选列表
     let isRecognizing = false;     // 防止重复识别
+    let _lastBinaryCanvas = null;  // 二值化后的图片（用于预览）
 
     // 原始 Excel 数据（用于导出时写入）
     let originalExcelBuffer = null; // ArrayBuffer
@@ -667,7 +680,7 @@
         const text = result.data.text.trim().replace(/[^\u4e00-\u9fff]/g, '');
         const cands = text ? rankCandidates(text) : [];
 
-        displayCandidates(cands);
+        displayCandidates(cands, binary);
 
       } catch (e) {
         setStatus('识别失败：' + e.message, 'err');
@@ -679,11 +692,17 @@
     }
 
 
-    // ===== 对所有名单打分并排序 =====
+    // ===== 对所有名单打分并排序（排除已有成绩的学生）=====
     function rankCandidates(text) {
       if (!text || studentNames.length === 0) return [];
 
-      const scored = studentNames.map(cn => {
+      // 已登记过成绩的不再参与匹配
+      const scored = studentNames
+        .filter(cn => {
+          const row = studentRows.find(r => r.name === cn);
+          return !(row && row.hasScore) && !enteredNames.has(cn);
+        })
+        .map(cn => {
         let score = 0;
 
         // 精确包含 → 最高分
@@ -721,10 +740,18 @@
     // ===== 展示候选列表 =====
     let selectedName = null; // 当前选中的姓名
 
-    function displayCandidates(candidates) {
+    function displayCandidates(candidates, binaryCanvas) {
       _lastCandidates = candidates;
       document.getElementById('result-card').style.display = 'block';
       pendingScore = 80;
+
+      const previewImg = document.getElementById('preview-img');
+      if (binaryCanvas) {
+        previewImg.src = binaryCanvas.toDataURL('image/png');
+        previewImg.style.display = 'block';
+      } else {
+        previewImg.style.display = 'none';
+      }
 
       const wrap = document.getElementById('candidates-wrap');
       const noCand = document.getElementById('no-candidates');

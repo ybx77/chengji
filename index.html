@@ -1132,6 +1132,12 @@
 
         // getElementsByTagName 不受 XML 命名空间影响
         const allRows = doc.getElementsByTagName('row');
+        console.log('Worksheet 总行数:', allRows.length);
+        if (allRows.length > 0) {
+          console.log('第1行 getAttribute("r"):', allRows[0].getAttribute('r'));
+          console.log('第1行 attributes["r"]:', allRows[0].attributes['r'] ? allRows[0].attributes['r'].value : 'undefined');
+          console.log('第1行 outerHTML:', allRows[0].outerHTML.slice(0, 300));
+        }
 
         for (const row of toWrite) {
           const excelRow = row.rowIndex + 1;
@@ -1139,7 +1145,8 @@
           // 查找对应行号的 row 节点
           let targetRow = null;
           for (let i = 0; i < allRows.length; i++) {
-            if (allRows[i].getAttribute('r') === String(excelRow)) {
+            const rAttr = allRows[i].attributes['r']?.value;
+            if (rAttr === String(excelRow)) {
               targetRow = allRows[i];
               break;
             }

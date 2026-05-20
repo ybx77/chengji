@@ -490,6 +490,12 @@
       <input type="file" id="file-excel" accept=".xlsx,.xls" onchange="loadExcel(this.files[0])">
       <span class="file-info" id="excel-info">未导入</span>
     </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+      <span style="font-size:13px;color:#888">成绩列：</span>
+      <select id="col-select" style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid #2a2a45;background:#12122a;color:#e0e0ff;font-size:13px" onchange="onColSelectChange()">
+        <option value="-1">自动识别</option>
+      </select>
+    </div>
     <div id="name-list" class="record-list" style="margin-top:10px; max-height:120px">
       <div class="empty-hint">请先导入包含学生姓名的 Excel</div>
     </div>
@@ -544,6 +550,7 @@
     let originalExcelBuffer = null; // ArrayBuffer
     let scoreColIndex = -1;        // 成绩列索引（0-based）
     let studentRows = [];          // [{rowIndex, name, hasScore}]
+    let excelHeaders = [];         // [{idx, name}] 表头列表（用于手动选列）
 
     const video  = document.getElementById('video');
     const canvas = document.getElementById('canvas');
@@ -850,6 +857,7 @@
         if (allRows.length === 0) continue;
 
         let nameColIdx = -1, scoreColIdx = -1;
+        excelHeaders = []; // 重置表头
         const headerCells = allRows[0].querySelectorAll('c');
         headerCells.forEach((cell, ci) => {
           let val = '';
@@ -860,8 +868,19 @@
             val = cell.querySelector('v')?.textContent || '';
           }
           val = val.trim();
+          excelHeaders.push({ idx: ci, name: val });
           if (val.includes('姓名')) nameColIdx = ci;
           if (val.includes('成绩') || val.includes('得分') || val.includes('分数')) scoreColIdx = ci;
+        });
+
+        // 填充手动选列下拉框
+        const sel = document.getElementById('col-select');
+        sel.innerHTML = '<option value="-1">自动识别</option>';
+        excelHeaders.forEach((h, i) => {
+          const opt = document.createElement('option');
+          opt.value = String(h.idx);
+          opt.textContent = `第${i + 1}列: ${h.name || '(空)'}`;
+          sel.appendChild(opt);
         });
 
         if (nameColIdx < 0) {
@@ -911,6 +930,7 @@
         }
 
         scoreColIndex = scoreColIdx;
+        document.getElementById('col-select').value = String(scoreColIdx);
       }
 
       studentNames = [...new Set(studentNames)];
@@ -919,6 +939,17 @@
       document.getElementById('excel-info').textContent = `${loaded} 人（${scored} 人已有成绩）`;
       renderNameList();
       setStatus(`已加载 ${studentNames.length} 名学生`, 'ok');
+    }
+
+    function onColSelectChange() {
+      const sel = document.getElementById('col-select');
+      scoreColIndex = parseInt(sel.value);
+      if (scoreColIndex >= 0) {
+        // 用手动选择的列重新判断谁有成绩
+        studentRows.forEach(r => r.hasScore = false);
+        // hasScore 逻辑交给 exportExcel 统一处理，这里只影响 OCR 过滤
+        setStatus(`成绩列已设为: ${excelHeaders[scoreColIndex]?.name || ('第' + (scoreColIndex + 1) + '列')}`, 'ok');
+      }
     }
 
     function renderNameList() {
@@ -1009,6 +1040,7 @@
       }
       targetRow.score = score;
       targetRow.entered = true;
+      targetRow.hasScore = true; // 关键：标记已录入，防止重复匹配
       return { ok: true };
     }
 
@@ -1053,12 +1085,15 @@
         // 修改 worksheet
         const doc = new DOMParser().parseFromString(wsXml, 'text/xml');
 
-        // 使用 loadExcel 时记录的列索引
-        const colLetter = scoreColIndex >= 0 ? String.fromCharCode(65 + scoreColIndex) : 'B';
-
-        // 写入成绩
+        // 写入成绩（只写本次新录入的，覆盖时允许）
+        const colLetter = scoreColIndex >= 0 ? String.fromCharCode(65 + scoreColIndex) : null;
+        if (colLetter === null) {
+          alert('未找到成绩列，请手动指定后再导出');
+          setStatus('导出失败：未指定成绩列', 'err');
+          return;
+        }
         for (const row of studentRows) {
-          if (!row.entered) continue;
+          if (!row.entered || colLetter === null) continue;
           const excelRow = row.rowIndex + 1;
           const targetRow = doc.querySelector(`row[r="${excelRow}"]`);
           if (!targetRow) continue;

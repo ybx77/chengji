@@ -1119,6 +1119,7 @@
 
         // 写入成绩（只写本次新录入的，覆盖时允许）
         const colLetter = scoreColIndex >= 0 ? String.fromCharCode(65 + scoreColIndex) : null;
+        console.log('[export] scoreColIndex:', scoreColIndex, 'colLetter:', colLetter);
         if (colLetter === null) {
           alert('未找到成绩列，请手动指定后再导出');
           setStatus('导出失败：未指定成绩列', 'err');
@@ -1127,7 +1128,8 @@
 
         // 统计本次录入的记录
         const toWrite = studentRows.filter(r => r.entered);
-        console.log('本次录入记录：', toWrite);
+        console.log('[export] toWrite:', toWrite);
+        console.log('[export] scoreIdxMap:', [...scoreIdxMap.entries()]);
 
         // getElementsByTagName 不受 XML 命名空间影响
         const allRows = doc.getElementsByTagName('row');
@@ -1155,6 +1157,7 @@
 
           const cellRef = `${colLetter}${excelRow}`;
           const ssi = scoreIdxMap.get(row.name);
+          console.log(`[export] ${row.name} → ${cellRef}，sharedString索引=${ssi}`);
 
           // 查找或创建单元格
           const existingCells = targetRow.getElementsByTagName('c');
@@ -1198,9 +1201,17 @@
             }
             if (!inserted) targetRow.appendChild(cell);
           }
+          console.log(`[export] 写入后 row[${excelRow}] XML:`, targetRow.outerHTML.slice(0, 400));
         }
 
         zip.file(sheetFile, new XMLSerializer().serializeToString(doc));
+        const wsXmlAfter = new XMLSerializer().serializeToString(doc);
+        console.log('[export] worksheet 序列化后前600字符:', wsXmlAfter.slice(0, 600));
+        if (!wsXmlAfter.includes(colLetter + String(toWrite[0]?.rowIndex + 1))) {
+          alert('[诊断] 警告：序列化后的 XML 中未找到 ' + colLetter + (toWrite[0]?.rowIndex + 1) + '，内容：\n' + wsXmlAfter.slice(0, 800));
+        } else {
+          alert('[诊断] OK：序列化后的 XML 中找到了 ' + colLetter + (toWrite[0]?.rowIndex + 1));
+        }
         const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', compression: 'DEFLATE' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);

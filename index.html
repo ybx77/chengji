@@ -1087,8 +1087,9 @@
 
       try {
         const zip = await JSZip.loadAsync(originalExcelBuffer);
-        const sheets = Object.keys(zip.files).filter(k => k.endsWith('.xml') && !k.startsWith('_rels'));
+        const sheets = Object.keys(zip.files).filter(k => k.startsWith('xl/worksheets/sheet') && k.endsWith('.xml'));
         const sheetFile = sheets[0];
+        if (!sheetFile) { alert('未找到工作表文件'); return; }
         const wsXml = await zip.file(sheetFile).async('string');
 
         // 读取 sharedStrings
